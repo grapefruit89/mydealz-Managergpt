@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         mydealz Manager
 // @namespace    http://tampermonkey.net/
-// @version      1.18.0_251214_0855
-// @description  Deals gezielt ausblenden mittels X Button, Filtern nach Händlern und Wörtern im Titel. Teure und kalte Deals ausblenden.
+// @version      1.18.0_260106_1837
+// @description  Blendet unerwünschte Deals nach Händler, Wörtern, Preis und Temperatur aus, entfernt Händlernamen aus Titeln und bietet komfortable Listen zur Verwaltung von Filtern und blockierten Nutzern.
 // @author       Flo (https://www.mydealz.de/profile/Basics0119) (https://github.com/9jS2PL5T) & Moritz Baumeister (https://www.mydealz.de/profile/BobBaumeister) (https://github.com/grapefruit89)
 // @license      MIT
 // @match        https://www.mydealz.de/*
@@ -16,37 +16,51 @@
 // ==/UserScript==
 
 // Versions-Änderungen
-// 2025-12-10 - v1.18.0
+// 202x-xx-xx - v1.18.0
 // FIX: Beim Update des Scripts wurden manche gesetzten Einstellungen nicht korrekt übernommen
 // FIX: "Händler im Titel ausblenden" funktionierte nicht für gecachte Deals - Cache-Logik optimiert
 // FIX: "Händler im Titel ausblenden" entfernt jetzt auch Händlernamen in der Mitte des Titels (z.B. "(CB) Kärcher Waschsauger" → "(CB) Waschsauger")
 // FIX: Wortfilter funktionierte nicht wenn "Händler im Titel ausblenden" aktiv war - Ausführungsreihenfolge korrigiert (hideMatchingMerchantNames läuft jetzt VOR Cache-Check)
 // FIX: Wortfilter sieht jetzt die geänderten Titel statt der Original-Titel - Cache-Key berücksichtigt hideMatchingMerchantNames-Status
+// FIX: Preisfilter funktionierte nicht
 // ADD: Wortfilter unterstützt jetzt Wildcards (*) für flexible Teilmatches im Titel
 // ADD: UND-Filter (+) - Mehrere Wörter müssen im Titel vorkommen (z.B. "discord+nitro")
 // ADD: Negation-Filter (-) - Wort muss vorkommen, aber nicht ein anderes (z.B. "weißwein -glas")
 // ADD: Sortierung der Filterlisten nach "Alphabet" und "Hinzugefügt am"
-// ADD: Timestamp-Anzeige für Filtereinträge - neue Einträge zeigen "am [Datum]", Legacy-Einträge "vor dem [Datum]" hinzugefügt
+// ADD: Timestamp-Anzeige für Filtereinträge - Zeigt an, wann ein Wort/Händler/User zur Filterliste hinzugefügt wurde
 // ADD: Whitelist für Wörter im Titel - Deals mit diesen Wörter werden nicht ausgeblendet
 // ADD: Debug-Kontextmenü mit übersichtlichem Toggle-Panel für alle Debug-Flags (persistent gespeichert)
 // ADD: Ausführliches Debug-Logging für Wortfilter (zeigt rawTitle, normalizedTitle, alle Filter, Match-Details)
 // CHANGE: Settings-Dialog zeigt nun Grip-Icon (⋮⋮) zur visuellen Kennzeichnung der Drag-Funktionalität (nur Desktop)
 // CHANGE: Settings-Dialog passt Größe dynamisch an aus-/eingeklappte Accordion-Sektionen an
 // OPTIMIZATION: localStorage komplett entfernt - Script nutzt jetzt ausschließlich GM Storage (außer externe Abhängigkeiten)
+// REMOVED: Funktion zum Ausblenden des Teilen-Buttons entfernt. Empfehlung: uBlock Origin oder ähnliche Content-Blocker.
 
 //#region --- 1. Initialisierung und Grundeinstellungen ---
+
+// ===== Debug-Menü Sichtbarkeit =====
+// Nur für Debugging - auf true setzen um Debug-Menü in Tampermonkey zu aktivieren
+const SHOW_DEBUG_MENU = false;
 
 // ===== Debug-Konfiguration =====
 // Default-Werte (werden am Script-Ende durch loadDebugConfig() überschrieben)
 const DEBUG = {
   hideMatchingMerchantNames: false, // Debug-Logs für Händlernamen-Feature
   priceFilter: false, // Debug-Logs für Preis-Filter
-  merchantFilter: true, // Debug-Logs für Händlerfilter (zeigt Händler-ID, Name und Match-Details)
+  priceFilterVerbose: false, // Sehr detaillierte PriceFilter-Logs (Parsing/Selector-Details)
+  merchantFilter: false, // Debug-Logs für Händlerfilter (zeigt Händler-ID, Name und Match-Details)
+  merchantInfoVerbose: false, // Detaillierte MerchantInfo-Logs (merchantId gefunden)
   userBlocking: false, // Debug-Logs für User-Blocking
   backup: false, // Debug-Logs für Backup/Restore
   criticalErrors: false, // Warnt bei fehlgeschlagenen Selektoren
-  wordFilter: false, // Debug-Logs für Wortfilter (zeigt Titel und Match-Versuche)
+  wordFilter: false, // Debug-Logs für Wortfilter
+  wordFilterVerbose: false, // Sehr detaillierte WordFilter-Logs (Testing filters mit allen Details)
   dataLoading: false, // Debug-Logs für Laden von gespeicherten Daten (excludeWords, merchants, etc.)
+  initialization: false, // Debug-Logs für Script-Initialisierung (init(), loadSettings())
+
+  // 🔍 DELAY DEBUGGING: Deaktiviert alle Performance-Optimierungen für Tests
+  disableOptimizations: false, // Wenn true: Kein Debounce, kein Throttle, kein Early Exit
+  delayDebug: false, // Debug-Logs für Observer/Processing Delays (SKIPPED, EXECUTING, Observer-Trigger, etc.)
 
   // Performance Monitoring (granular)
   performance: {
@@ -54,10 +68,11 @@ const DEBUG = {
     observer: false, // MutationObserver Callbacks
     processing: false, // processArticles() Durchläufe
     filtering: false, // Filter-Operationen (Wort/Händler/Preis)
-    caching: true, // Cache-Hits/Misses - STANDARD AN wegen Debug
+    caching: false, // Cache-Hits/Misses
     domManipulation: false, // DOM-Updates (Titel, Verstecken)
     timing: false, // Detaillierte Timing-Messungen
     summary: false, // Performance-Zusammenfassung
+    lazyRenderSummary: false, // Kurze Zusammenfassung bei verzögert geladenen Deals
   },
 };
 
@@ -811,8 +826,8 @@ function getArticleMerchantInfo(article) {
 
   const merchantId = ids.size ? String(Array.from(ids)[0]).trim() : null;
 
-  // DEBUG: Logge wenn merchantId verfügbar wird
-  if (DEBUG.merchantFilter && merchantId && merchantLink) {
+  // DEBUG: Logge wenn merchantId verfügbar wird (nur bei verbose)
+  if (DEBUG.merchantInfoVerbose && merchantId && merchantLink) {
     console.log(`[${getDebugTimestamp()}] [MDM MerchantInfo] merchantId gefunden:`, {
       dealId,
       merchantId,
@@ -838,8 +853,9 @@ function createExcludeWordEntry(word) {
   const normalized = normalizeForSearch(word);
   if (!normalized) return null;
 
-  // Bracket-Filter haben höchste Priorität
-  if (normalized.startsWith("[") && normalized.endsWith("]")) {
+  // Bracket-Filter haben höchste Priorität - unterstützt [] und ()
+  if ((normalized.startsWith("[") && normalized.endsWith("]")) ||
+      (normalized.startsWith("(") && normalized.endsWith(")"))) {
     return {
       original: word,
       type: "bracket",
@@ -898,6 +914,78 @@ function createExcludeWordEntry(word) {
     }
   }
 
+  // NEGATION-Filter (UND-Verknüpfung): Alle Negations-Wörter müssen vorkommen
+  // Syntax: "Fritz!Fon -bundle+-router" → matched "Fritz!Fon" ABER NICHT wenn "bundle" UND "router" BEIDE vorkommen
+  // WICHTIG: Muss VOR dem normalen UND-Filter geprüft werden!
+  if (normalized.includes(" -") && normalized.match(/-[^-\s]+\+-/)) {
+    const mainPart = normalized.split(" -")[0].trim();
+    const negationPart = normalized.substring(mainPart.length).trim();
+    const negationTerms = negationPart
+      .split(/\s+-/) // Split bei " -"
+      .map(p => p.trim())
+      .filter(Boolean)
+      .flatMap(group => group.split("+").map(t => t.trim()).filter(Boolean))
+      .map(term => term.startsWith("-") ? term.substring(1) : term); // Entferne führendes "-"
+
+    if (DEBUG.wordFilter) {
+      console.log("[MDM WordFilter] 🔧 Parsing negation-and filter:", {
+        original: word,
+        normalized,
+        mainPart,
+        negationPart,
+        negationTerms
+      });
+    }
+
+    if (negationTerms.length >= 2) {
+      const createRegex = (part) => {
+        if (part.includes("*")) {
+          let pattern = escapeRegex(part).replace(/\\\*/g, ".*");
+          if (!part.startsWith("*")) pattern = "\\b" + pattern;
+          if (!part.endsWith("*")) pattern = pattern + "\\b";
+          return new RegExp(pattern, "i");
+        }
+        return new RegExp(escapeRegex(part), "i");
+      };
+
+      const mustHaveRegex = createRegex(mainPart);
+      const negationRegexes = negationTerms.map(createRegex);
+
+      return {
+        original: word,
+        type: "negation-and",
+        normalized,
+        mustHave: mainPart,
+        mustNotHave: negationTerms.join(" UND "),
+        matcher: (title) => {
+          const hasMainWord = mustHaveRegex.test(title);
+          const allNegationsPresent = negationRegexes.every((regex) => regex.test(title));
+
+          if (DEBUG.wordFilter) {
+            console.log("[MDM WordFilter] 🎯 Testing negation-and filter:", {
+              filter: word,
+              title: title.substring(0, 100),
+              hasMainWord,
+              allNegationsPresent,
+              negationTests: negationRegexes.map((regex, i) => ({
+                term: negationTerms[i],
+                regex: regex.source,
+                matches: regex.test(title)
+              })),
+              willFilter: hasMainWord && allNegationsPresent
+            });
+          }
+
+          // Muss Hauptwort enthalten
+          if (!hasMainWord) return false;
+          // Filtere NUR wenn ALLE Negations-Wörter vorkommen
+          if (allNegationsPresent) return true;
+          return false;
+        },
+      };
+    }
+  }
+
   // UND-Filter: Alle Wörter müssen vorkommen (egal in welcher Reihenfolge)
   if (normalized.includes("+")) {
     const parts = normalized
@@ -913,7 +1001,8 @@ function createExcludeWordEntry(word) {
           if (!part.endsWith("*")) pattern = pattern + "\\b";
           return new RegExp(pattern, "i");
         }
-        return new RegExp(escapeRegex(part), "i");
+        // Normale Teile AUCH mit Wortgrenzen
+        return new RegExp(`\\b${escapeRegex(part)}\\b`, "i");
       });
       return {
         original: word,
@@ -925,16 +1014,28 @@ function createExcludeWordEntry(word) {
     }
   }
 
-  // NEGATION-Filter: Begriff muss vorkommen, ABER NICHT wenn Ausschluss-Wort auch vorkommt
-  // Syntax: "weißwein -glas" → matched "weißwein" ABER NICHT "weißweinglas" oder "weißwein glas"
-  if (normalized.includes(" -")) {
-    const parts = normalized
+  // NEGATION-Filter (UND-Verknüpfung): Alle Negations-Wörter müssen vorkommen
+  // Syntax: "Fritz!Fon -bundle+-router" → matched "Fritz!Fon" ABER NICHT wenn "bundle" UND "router" BEIDE vorkommen
+  if (normalized.includes(" -") && normalized.match(/-[^-\s]+\+-/)) {
+    const mainPart = normalized.split(" -")[0].trim();
+    const negationPart = normalized.substring(mainPart.length).trim();
+    const negationTerms = negationPart
       .split(/\s+-/)
-      .map((p) => p.trim())
-      .filter(Boolean);
-    if (parts.length === 2) {
-      const [mustHave, mustNotHave] = parts;
-      // Unterstützung für Wildcards in Negation-Filter
+      .map(p => p.trim())
+      .filter(Boolean)
+      .flatMap(group => group.split("+").map(t => t.trim()).filter(Boolean));
+
+    if (DEBUG.wordFilter) {
+      console.log("[MDM WordFilter] 🔧 Parsing negation-and filter:", {
+        original: word,
+        normalized,
+        mainPart,
+        negationPart,
+        negationTerms
+      });
+    }
+
+    if (negationTerms.length >= 2) {
       const createRegex = (part) => {
         if (part.includes("*")) {
           let pattern = escapeRegex(part).replace(/\\\*/g, ".*");
@@ -944,20 +1045,99 @@ function createExcludeWordEntry(word) {
         }
         return new RegExp(escapeRegex(part), "i");
       };
-      const mustHaveRegex = createRegex(mustHave);
-      const mustNotHaveRegex = createRegex(mustNotHave);
+
+      const mustHaveRegex = createRegex(mainPart);
+      const negationRegexes = negationTerms.map(createRegex);
+
       return {
         original: word,
-        type: "negation",
+        type: "negation-and",
+        normalized,
+        mustHave: mainPart,
+        mustNotHave: negationTerms.join(" UND "),
+        matcher: (title) => {
+          const hasMainWord = mustHaveRegex.test(title);
+          const allNegationsPresent = negationRegexes.every((regex) => regex.test(title));
+
+          if (DEBUG.wordFilter) {
+            console.log("[MDM WordFilter] 🎯 Testing negation-and filter:", {
+              filter: word,
+              title: title.substring(0, 100),
+              hasMainWord,
+              allNegationsPresent,
+              negationTests: negationRegexes.map((regex, i) => ({
+                term: negationTerms[i],
+                regex: regex.source,
+                matches: regex.test(title)
+              })),
+              willFilter: hasMainWord && allNegationsPresent
+            });
+          }
+
+          // Muss Hauptwort enthalten
+          if (!hasMainWord) return false;
+          // Filtere NUR wenn ALLE Negations-Wörter vorkommen
+          if (allNegationsPresent) return true;
+          return false;
+        },
+      };
+    }
+  }
+
+  // NEGATION-Filter (ODER-Verknüpfung): Eines der Negations-Wörter reicht
+  // Syntax: "Fritz!Fon -bundle -router" → matched "Fritz!Fon" ABER NICHT wenn "bundle" ODER "router" vorkommt
+  if (normalized.includes(" -")) {
+    const parts = normalized
+      .split(/\s+-/)
+      .map((p) => p.trim())
+      .filter(Boolean);
+    if (parts.length >= 2) {
+      const mustHave = parts[0];
+      const mustNotHaveList = parts.slice(1);
+
+      const createRegex = (part) => {
+        if (part.includes("*")) {
+          let pattern = escapeRegex(part).replace(/\\\*/g, ".*");
+          if (!part.startsWith("*")) pattern = "\\b" + pattern;
+          if (!part.endsWith("*")) pattern = pattern + "\\b";
+          return new RegExp(pattern, "i");
+        }
+        return new RegExp(escapeRegex(part), "i");
+      };
+
+      const mustHaveRegex = createRegex(mustHave);
+      const mustNotHaveRegexes = mustNotHaveList.map(createRegex);
+
+      return {
+        original: word,
+        type: "negation-or",
         normalized,
         mustHave,
-        mustNotHave,
+        mustNotHave: mustNotHaveList.join(" ODER "),
         matcher: (title) => {
-          // Titel muss das Hauptwort enthalten
-          if (!mustHaveRegex.test(title)) return false;
-          // ABER NICHT das ausgeschlossene Wort
-          if (mustNotHaveRegex.test(title)) return false;
-          return true;
+          const hasMainWord = mustHaveRegex.test(title);
+          const anyNegationPresent = mustNotHaveRegexes.some((regex) => regex.test(title));
+
+          if (DEBUG.wordFilter) {
+            console.log("[MDM WordFilter] 🎯 Testing negation-or filter:", {
+              filter: word,
+              title: title.substring(0, 100),
+              hasMainWord,
+              anyNegationPresent,
+              negationTests: mustNotHaveRegexes.map((regex, i) => ({
+                term: mustNotHaveList[i],
+                regex: regex.source,
+                matches: regex.test(title)
+              })),
+              willFilter: hasMainWord && anyNegationPresent
+            });
+          }
+
+          // Muss Hauptwort enthalten
+          if (!hasMainWord) return false;
+          // Filtere wenn EINES der Negations-Wörter vorkommt
+          if (anyNegationPresent) return true;
+          return false;
         },
       };
     }
@@ -1011,12 +1191,32 @@ function createExcludeWordEntry(word) {
 function rebuildExcludeWordCache(words) {
   const list = Array.isArray(words) ? words : [];
   excludeWordCache = list.map(createExcludeWordEntry).filter(Boolean);
+
+  // Hash über alle Filter-Inhalte berechnen für Cache-Invalidierung
+  excludeWordsHash = simpleHash(list.join('|'));
+
+  if (DEBUG.wordFilter) {
+    const fritzfonFilters = excludeWordCache.filter(f =>
+      f.original.toLowerCase().includes('fritz') ||
+      f.normalized.toLowerCase().includes('fritz')
+    );
+
+    console.log("[MDM WordFilter] 📋 Rebuilt filter cache:", {
+      totalWords: list.length,
+      totalFilters: excludeWordCache.length,
+      excludeWordsHash,
+      filterTypes: excludeWordCache.reduce((acc, f) => {
+        acc[f.type] = (acc[f.type] || 0) + 1;
+        return acc;
+      }, {}),
+      fritzfonFilters: fritzfonFilters
+    });
+  }
 }
 
 // --- Feature Flags ---
 const FEATURES = {
   hideMatchingMerchantNames: "hideMatchingMerchantNames",
-  hideShareButtons: "hideShareButtons",
   rememberSort: "rememberSort",
 };
 
@@ -1124,6 +1324,13 @@ const observer = new MutationObserver(
       perfTracker.start("observer");
       perfTracker.update("observer.calls", 1);
 
+      if (DEBUG.delayDebug) {
+        console.log(
+          `[${getDebugTimestamp()}] 🔍 [DELAY DEBUG] Observer triggered:`,
+          { mutationCount: mutations.length, throttleDelay: '1500ms' }
+        );
+      }
+
       if (DEBUG.performance.observer) {
         perfTracker.log("observer", "triggered", {
           mutationCount: mutations.length,
@@ -1143,6 +1350,7 @@ const observer = new MutationObserver(
                   : node.querySelectorAll?.('a[data-t="merchantLink"]') || [];
 
                 if (merchantLinks.length > 0) {
+                  merchantLinksChangedSinceLastBatch = true;
                   const deal = node.closest?.(ARTICLE_SELECTOR);
                   const dealId = deal?.getAttribute?.("id") || "unknown";
                   console.log(`[${getDebugTimestamp()}] [MDM Observer] merchantLink hinzugefügt:`, {
@@ -1192,8 +1400,19 @@ const observer = new MutationObserver(
 
       processingScheduled = true;
 
+      if (DEBUG.delayDebug) {
+        console.log(
+          `[${getDebugTimestamp()}] 📅 [DELAY DEBUG] processArticles scheduled via requestAnimationFrame`
+        );
+      }
+
       // Verzögerte Verarbeitung um mehrere Änderungen zu bündeln
       requestAnimationFrame(() => {
+        if (DEBUG.delayDebug) {
+          console.log(
+            `[${getDebugTimestamp()}] ▶️ [DELAY DEBUG] requestAnimationFrame executing`
+          );
+        }
         processArticles();
         addSettingsButton();
         addHideButtons();
@@ -1251,10 +1470,28 @@ let restoreCommandId;
 
 // --- Feature-Flags ---
 let hideMatchingMerchantNames = GM_getValue("hideMatchingMerchantNames", false);
-let hideShareButtons = GM_getValue("hideShareButtons", false);
+// WICHTIG: Sofort auf window setzen, BEVOR Observer triggern kann!
+window.hideMatchingMerchantNames = hideMatchingMerchantNames;
 
 // --- Temporäre Listen ---
 let recentHiddenDeals = [];
+
+// ===== Initialisierungs-Schutz =====
+// Verhindert mehrfache Ausführung von init() pro Seitenladung
+let initHasRun = false;
+
+// ===== Delayed Re-Check Schutz =====
+// Verhindert mehrfache parallele Delayed Re-Checks für Merchant-Filter
+let delayedMerchantRecheckScheduled = false;
+// Intelligente Guards gegen unnötige Re-Checks
+let lastSuccessfulMerchantRecheck = 0;
+let lastKnownDealCount = 0;
+
+// ===== processArticles() Debounce =====
+// Verhindert redundante Batches wenn sich nichts geändert hat
+let lastProcessArticlesTime = 0;
+let lastProcessArticlesDealCount = 0;
+let merchantLinksChangedSinceLastBatch = false;
 
 // --- Sortier-States für Filterlisten ---
 let listSortStates = {
@@ -1296,15 +1533,33 @@ function escapeRegExp(string) {
 
 // ===== Performance Optimierung =====
 // Funktion zur Begrenzung der Ausführungshäufigkeit (Throttling)
-function throttle(func, limit) {
+function throttle(func, limit, options = { leading: true, trailing: false }) {
   let inThrottle;
+  let lastArgs;
+  let lastThis;
+  let trailingTimeoutId;
+
   return function (...args) {
+    lastArgs = args;
+    lastThis = this;
+
     if (!inThrottle) {
-      func.apply(this, args);
+      // Führe sofort aus (leading)
+      if (options.leading) {
+        func.apply(this, args);
+      }
+
       inThrottle = true;
+
       setTimeout(() => {
+        // Wenn trailing aktiviert und es gab weitere Aufrufe
+        if (options.trailing && lastArgs) {
+          func.apply(lastThis, lastArgs);
+        }
+
         inThrottle = false;
-        return false;
+        lastArgs = null;
+        lastThis = null;
       }, limit);
     }
   };
@@ -1355,10 +1610,20 @@ function getWordsFromTitle(deal) {
   const titleElement = deal.querySelector(".thread-title a");
   if (!titleElement) return [];
 
-  const rawTitle =
-    titleElement.querySelector("a")?.getAttribute("title") ||
-    titleElement.innerText ||
-    "";
+  // WICHTIG: Verwende ORIGINAL_TITLES für Wortvorschläge, damit Händlernamen verfügbar bleiben
+  const dealId = deal.id || deal.getAttribute("data-thread-id");
+  let rawTitle;
+
+  if (dealId && ORIGINAL_TITLES.has(dealId)) {
+    // Nutze den gespeicherten Originaltitel
+    rawTitle = ORIGINAL_TITLES.get(dealId);
+  } else {
+    // Fallback: Hole Titel aus DOM
+    rawTitle =
+      titleElement.querySelector("a")?.getAttribute("title") ||
+      titleElement.innerText ||
+      "";
+  }
 
   const keepWords = [
     "von",
@@ -1530,8 +1795,24 @@ function getWordsFromTitle(deal) {
 // ===== Einstellungen laden/speichern =====
 // Laden aller gespeicherten Einstellungen
 function loadSettings() {
+  if (DEBUG.initialization) {
+    console.log("[MDM] 📥 loadSettings() called, DEBUG.wordFilter =", DEBUG.wordFilter);
+  }
+
+  if (DEBUG.priceFilter) {
+    console.log("[MDM PriceFilter] ⚙️ loadSettings() called - loading maxPrice...");
+  }
+
   // Lade Wortfilter und Händlerfilter
   excludeWords = loadExcludeWords();
+
+  if (DEBUG.wordFilter) {
+    console.log("[MDM WordFilter] 📥 Loading exclude words:", {
+      count: excludeWords.length,
+      sample: excludeWords.slice(0, 5)
+    });
+  }
+
   rebuildExcludeWordCache(excludeWords);
   whitelistWords = loadWhitelistWords();
   rebuildWhitelistCache(whitelistWords);
@@ -1542,13 +1823,43 @@ function loadSettings() {
   // Lade Preisfilter
   maxPrice = parseFloat(GM_getValue("maxPrice", 0)) || 0;
 
+  if (DEBUG.priceFilter) {
+    console.log("[MDM PriceFilter] ⚙️ loadSettings: maxPrice loaded:", {
+      storedValue: GM_getValue("maxPrice", 0),
+      parsedValue: maxPrice,
+      type: typeof maxPrice,
+      willFilter: maxPrice > 0
+    });
+  }
+
   // Lade UI-Einstellungen
   hideColdDeals = GM_getValue("hideColdDeals", false);
   hideMatchingMerchantNames = GM_getValue("hideMatchingMerchantNames", false);
-  hideShareButtons = GM_getValue("hideShareButtons", false);
 
   // Lade versteckte Deals
   hiddenDeals = GM_getValue("hiddenDeals", []);
+
+  // Migriere alte User-Array-Daten zu Object-Format
+  const blockedUsersData = GM_getValue("blockedUsers", null);
+  if (Array.isArray(blockedUsersData)) {
+    // Alte Array-Struktur → Konvertiere zu Object
+    const blockedUsersObj = {};
+    blockedUsersData.forEach(username => {
+      const normalized = username.toLowerCase();
+      blockedUsersObj[normalized] = {
+        displayName: username,
+        normalizedUsername: normalized,
+        timestamp: Date.now()
+      };
+    });
+    GM_setValue("blockedUsers", blockedUsersObj);
+    if (DEBUG.userBlocking) {
+      console.log('[MDM UserBlock] Migrated old array to object format:', blockedUsersObj);
+    }
+  } else if (!blockedUsersData) {
+    // Initialisiere mit leerem Object
+    GM_setValue("blockedUsers", {});
+  }
 
   // Lade Sortierungsspeicher-Einstellung
   window.rememberSort = GM_getValue("rememberSort", true);
@@ -1599,11 +1910,34 @@ function saveExcludeWords(words, createMissingTimestamps = false) {
   }
 
   GM_setValue("excludeWords", normalizedWords);
+
+  // Deals sofort neu evaluieren damit Änderungen sofort sichtbar werden
+  const hiddenDeals = document.querySelectorAll('.mydealz-manager-hidden');
+  hiddenDeals.forEach(deal => {
+    deal.classList.remove('mydealz-manager-hidden');
+    deal.setAttribute('data-hidden-by-mydealz-manager', 'false');
+    deal.style.display = '';
+  });
+
+  // ProcessArticles filtert dann alles neu (inkl. Preis-Filter)
+  if (typeof processArticles === 'function') {
+    setTimeout(() => processArticles(), 50);
+  }
 }
 
 // Laden von Wortfiltern
 function loadExcludeWords() {
   const result = GM_getValue("excludeWords", []);
+
+  if (DEBUG.wordFilter) {
+    console.log("[MDM WordFilter] 📂 GM_getValue('excludeWords'):", {
+      type: typeof result,
+      isArray: Array.isArray(result),
+      length: result?.length,
+      sample: result?.slice ? result.slice(0, 5) : result
+    });
+  }
+
   ensureWordTimestamps(result, false);
   return result;
 }
@@ -1706,8 +2040,41 @@ function saveMaxPrice(price) {
     price = parseFloat(price.replace(",", ".")) || 0;
   }
 
+  if (DEBUG.priceFilter) {
+    console.log("[MDM PriceFilter] saveMaxPrice called:", {
+      input: arguments[0],
+      converted: price,
+      type: typeof price
+    });
+  }
+
   GM_setValue("maxPrice", price);
   maxPrice = price;
+
+  // Cache leeren wenn Preis-Filter sich ändert
+  processedDealsCache.clear();
+
+  if (DEBUG.priceFilter) {
+    console.log("[MDM PriceFilter] saveMaxPrice SAVED:", {
+      savedValue: price,
+      gmValue: GM_getValue("maxPrice"),
+      globalMaxPrice: maxPrice,
+      cacheCleared: true
+    });
+  }
+
+  // Deals sofort neu evaluieren
+  const hiddenDeals = document.querySelectorAll('.mydealz-manager-hidden');
+  hiddenDeals.forEach(deal => {
+    deal.classList.remove('mydealz-manager-hidden');
+    deal.setAttribute('data-hidden-by-mydealz-manager', 'false');
+    deal.style.display = '';
+  });
+
+  // ProcessArticles filtert dann alles neu (inkl. Wort-Filter)
+  if (typeof processArticles === 'function') {
+    setTimeout(() => processArticles(), 50);
+  }
 }
 //#endregion
 
@@ -1798,13 +2165,8 @@ function createSettingsUI() {
       showMerchantButton = true;
     }
 
-    // User Info
-    const userSpan = dealThatOpenedSettings.querySelector(
-      ".overflow--ellipsis.size--all-xs.size--fromW3-s"
-    );
-    const userName = userSpan?.textContent.match(
-      /Veröffentlicht von\s+(\S+)/
-    )?.[1];
+    // User Info - Use data-md-author for original case
+    const userName = dealThatOpenedSettings.getAttribute('data-md-author');
 
     if (userName) {
       userButtonHTML = `
@@ -1979,7 +2341,7 @@ function createSettingsUI() {
                         autocomplete="off"
                         ${IS_TOUCH_DEVICE ? "readonly" : ""}
                         placeholder="Neues Wort..."
-                        title="Wortfilter - Deals mit bestimmten Begriffen ausblenden\n\n📌 BEISPIELE:\n\nWildcard (*):\n  Kaffee*     → Kaffeemaschine, Kaffeetasse\n  *maschine   → Kaffeemaschine, Waschmaschine\n\nUND (+):\n  apple+watch     → Apple Watch\n  iphone+15+pro   → alle 3 Wörter müssen vorkommen\n\nNegation ( -):\n  iphone -hülle   → iPhone JA, aber NICHT mit Hülle\n  wein -glas      → Wein JA, aber NICHT Weinglas\n💡Leerzeichen vor dem Minus (-) ist wichtig!\n\n KOMBINATIONEN:\n  Flüge+Stuttgart -Berlin   → Flüge UND Stuttgart, OHNE Berlin\n  apple+*watch* -ultra      → Apple UND watch*, OHNE ultra\n  *kaffee*+vollautomat      → *kaffee* UND Vollautomat"
+                        title="Wortfilter - Deals mit bestimmten Begriffen ausblenden\n\n📌 BEISPIELE:\n\nWildcard (*):\n  Kaffee*     → Kaffeemaschine, Kaffeetasse\n  *maschine   → Kaffeemaschine, Waschmaschine\n\nUND (+):\n  apple+watch     → Apple Watch\n  iphone+15+pro   → alle 3 Wörter müssen vorkommen\n\nNegation ODER ( -):\n  iphone -hülle   → iPhone JA, aber NICHT mit Hülle\n  wein -glas      → Wein JA, aber NICHT Weinglas\n  Fritz!Fon -bundle -router   → Fritz!Fon JA, OHNE bundle ODER router\n💡Leerzeichen vor dem Minus (-) ist wichtig!\n\nNegation UND (+-): \n  Fritz!Fon -bundle+-router   → Fritz!Fon JA, AUSSER wenn bundle UND router BEIDE vorkommen\n\nKOMBINATIONEN:\n  Flüge+Stuttgart -Berlin   → Flüge UND Stuttgart, OHNE Berlin\n  apple+*watch* -ultra      → Apple UND watch*, OHNE ultra\n  *kaffee*+vollautomat      → *kaffee* UND Vollautomat"
                         style="
                             flex: 1;
                             border: none;
@@ -1992,17 +2354,19 @@ function createSettingsUI() {
                         display: flex;
                         align-items: center;
                         justify-content: center;
-                        width: 24px;
-                        height: 24px;
+                        width: 32px;
+                        height: 32px;
+                        margin-left: 8px;
                         padding: 0;
-                        background: ${colors.buttonBg};
-                        border: 1px solid ${colors.buttonBorder};
+                        background: ${colors.linkColor};
+                        border: none;
                         border-radius: 50%;
-                        color: ${colors.linkColor};
+                        color: ${colors.bg};
                         cursor: pointer;
-                        font-size: 12px;
+                        font-size: 16px;
                         font-weight: bold;
                         flex-shrink: 0;
+                        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
                     " title="Hilfe anzeigen">ⓘ</button>` : ''}
                 </div>
                 ${
@@ -2132,8 +2496,9 @@ function createSettingsUI() {
             }; opacity: 0.3; margin: 4px 0;"></div>
 
             <div class="toggle-option" style="display: flex; justify-content: space-between; align-items: center;">
-                <span style="display: flex; align-items: center; cursor: help;" title="Deals unter 0° werden ausgeblendet">
+                <span style="display: flex; align-items: center; gap: 4px; ${!IS_TOUCH_DEVICE ? 'cursor: help;' : ''}" title="${!IS_TOUCH_DEVICE ? 'Deals unter 0° werden ausgeblendet' : ''}">
                     Kalte Deals
+                    ${IS_TOUCH_DEVICE ? '<button class="feature-info-btn" data-info="Deals unter 0° werden ausgeblendet" style="background: none; border: none; color: ' + colors.linkColor + '; cursor: pointer; padding: 0; font-size: 12px; width: 16px; height: 16px;">ⓘ</button>' : ''}
                 </span>
                 <button type="button" id="hideColdDeals" class="eye-toggle" style="...">
                     <i class="fas ${
@@ -2148,8 +2513,9 @@ function createSettingsUI() {
             }; opacity: 0.3; margin: 4px 0;"></div>
 
             <div style="display: flex; align-items: center; gap: 10px;">
-                <label style="flex-grow: 1; cursor: help;" title="Deals über diesem Preis werden ausgeblendet">
+                <label style="flex-grow: 1; display: flex; align-items: center; gap: 4px; ${!IS_TOUCH_DEVICE ? 'cursor: help;' : ''}" title="${!IS_TOUCH_DEVICE ? 'Deals über diesem Preis werden ausgeblendet' : ''}">
                     Teure Deals
+                    ${IS_TOUCH_DEVICE ? '<button class="feature-info-btn" data-info="Deals über diesem Preis werden ausgeblendet" style="background: none; border: none; color: ' + colors.linkColor + '; cursor: pointer; padding: 0; font-size: 12px; width: 16px; height: 16px;">ⓘ</button>' : ''}
                 </label>
                 <input
                     type="text"
@@ -2178,43 +2544,6 @@ function createSettingsUI() {
   // Features Section
   sections.features.content.innerHTML = `
         <div class="section-content" style="display: flex; flex-direction: column; gap: 6px;">
-            ${
-              document.querySelector('[data-t="shareBtn"]')
-                ? `
-                <div class="toggle-option" style="display: flex; justify-content: space-between; align-items: center;">
-                    <span style="display: flex; align-items: center; cursor: help;" title="Blendet den Teilen Button in jedem Deal in der Übersicht aus">
-                        Teilen Button
-                    </span>
-                    <button type="button" id="hideShareButtons" class="eye-toggle" style="
-                        background: none;
-                        border: none;
-                        cursor: pointer;
-                        font-size: 18px;
-                        color: ${colors.text};
-                        width: 30px;
-                        height: 30px;
-                        display: flex;
-                        align-items: center;
-                        justify-content: center;
-                    ">
-                        <i class="fas ${
-                          window.hideShareButtons ? "fa-eye-slash" : "fa-eye"
-                        }"
-                        aria-label="${
-                          window.hideShareButtons
-                            ? "Share Buttons versteckt"
-                            : "Share Buttons sichtbar"
-                        }"></i>
-                    </button>
-                </div>
-
-                <!-- Separator -->
-                <div style="height: 1px; background: ${
-                  colors.border
-                }; opacity: 0.3; margin: 6px 0;"></div>
-            `
-                : ""
-            }
 
             <div class="toggle-option" style="
                 display: flex;
@@ -2226,8 +2555,9 @@ function createSettingsUI() {
             </div>
 
             <div class="toggle-option" style="display: flex; justify-content: space-between; align-items: center;">
-                <span style="display: flex; align-items: center; cursor: help;" title="Gibt es zu dem Deal einen hinterlegten Händler und befindet sich der Name des Händlers im Titel, so wird dieser Name aus dem Titel ausgeblendet.">
+                <span style="display: flex; align-items: center; gap: 4px; ${!IS_TOUCH_DEVICE ? 'cursor: help;' : ''}" title="${!IS_TOUCH_DEVICE ? 'Gibt es zu dem Deal einen hinterlegten Händler und befindet sich der Name des Händlers im Titel, so wird dieser Name aus dem Titel ausgeblendet.' : ''}">
                     Händler im Titel
+                    ${IS_TOUCH_DEVICE ? '<button class="feature-info-btn" data-info="Gibt es zu dem Deal einen hinterlegten Händler und befindet sich der Name des Händlers im Titel, so wird dieser Name aus dem Titel ausgeblendet." style="background: none; border: none; color: ' + colors.linkColor + '; cursor: pointer; padding: 0; font-size: 12px; width: 16px; height: 16px;">ⓘ</button>' : ''}
                 </span>
                 <button type="button" id="hideMatchingMerchantNames" class="eye-toggle" style="
                     background: none;
@@ -2261,8 +2591,9 @@ function createSettingsUI() {
 
             <!-- Toggle-Option für Speicherun der Sucheinstellungen -->
             <div class="toggle-option" style="display: flex; justify-content: space-between; align-items: center;">
-                <span style="display: flex; align-items: center; cursor: help;" title="Mit dieser Funktion werden die Werte für 'Sortieren' und 'Datumsbereich' gespeichert und bei zukünftigen Suchen sofort angewandt.">
+                <span style="display: flex; align-items: center; gap: 4px; ${!IS_TOUCH_DEVICE ? 'cursor: help;' : ''}" title="${!IS_TOUCH_DEVICE ? 'Mit dieser Funktion werden die Werte für \'Sortieren\' und \'Datumsbereich\' gespeichert und bei zukünftigen Suchen sofort angewandt.' : ''}">
                     Sucheinstellungen speichern
+                    ${IS_TOUCH_DEVICE ? '<button class="feature-info-btn" data-info="Mit dieser Funktion werden die Werte für \'Sortieren\' und \'Datumsbereich\' gespeichert und bei zukünftigen Suchen sofort angewandt." style="background: none; border: none; color: ' + colors.linkColor + '; cursor: pointer; padding: 0; font-size: 12px; width: 16px; height: 16px;">ⓘ</button>' : ''}
                 </span>
                 <button type="button" id="rememberSort" class="toggle-switch" style="
                     background: none;
@@ -2586,11 +2917,22 @@ function createSettingsUI() {
   if (hideUserDealsButton) {
     hideUserDealsButton.addEventListener("click", () => {
       console.log("[MDM] hideUserDealsButton clicked");
-      if (dealThatOpenedSettings) {
-        handleUserBlock(dealThatOpenedSettings);
-        cleanup();
-      } else {
-        console.log("[MDM] No dealThatOpenedSettings available");
+      console.log("[MDM] dealThatOpenedSettings:", dealThatOpenedSettings);
+      console.log("[MDM] dealThatOpenedSettings truthy:", !!dealThatOpenedSettings);
+      console.log("[MDM] typeof handleUserBlock:", typeof handleUserBlock);
+
+      try {
+        if (dealThatOpenedSettings) {
+          console.log("[MDM] Calling handleUserBlock with:", dealThatOpenedSettings.id);
+          handleUserBlock(dealThatOpenedSettings);
+          console.log("[MDM] handleUserBlock returned, calling cleanup");
+          cleanup();
+        } else {
+          console.log("[MDM] No dealThatOpenedSettings available");
+        }
+      } catch (error) {
+        console.error("[MDM] ERROR in hideUserDealsButton click handler:", error);
+        console.error("[MDM] Error stack:", error.stack);
       }
     });
   }
@@ -2750,9 +3092,13 @@ function createSettingsUI() {
           <code style="background: ${colors.inputBg}; padding: 2px 6px; border-radius: 3px;">apple+watch</code> → Apple Watch<br>
           <code style="background: ${colors.inputBg}; padding: 2px 6px; border-radius: 3px;">iphone+15+pro</code> → alle 3 Wörter
 
-          <h4 style="margin: 12px 0 8px; color: ${colors.linkColor};">Negation ( -)</h4>
+          <h4 style="margin: 12px 0 8px; color: ${colors.linkColor};">Negation ODER ( -)</h4>
           <code style="background: ${colors.inputBg}; padding: 2px 6px; border-radius: 3px;">iphone -hülle</code> → iPhone ohne Hülle<br>
-          <code style="background: ${colors.inputBg}; padding: 2px 6px; border-radius: 3px;">wein -glas</code> → Wein, aber nicht Weinglas
+          <code style="background: ${colors.inputBg}; padding: 2px 6px; border-radius: 3px;">Fritz!Fon -bundle -router</code> → Fritz!Fon ohne bundle ODER router
+
+          <h4 style="margin: 12px 0 8px; color: ${colors.linkColor};">Negation UND (+-)</h4>
+          <code style="background: ${colors.inputBg}; padding: 2px 6px; border-radius: 3px;">Fritz!Fon -bundle+-router</code><br>
+          → Fritz!Fon JA, AUSSER wenn bundle UND router BEIDE vorkommen
 
           <h4 style="margin: 12px 0 8px; color: ${colors.linkColor};">Kombinationen</h4>
           <code style="background: ${colors.inputBg}; padding: 2px 6px; border-radius: 3px;">Flüge+Stuttgart -Berlin</code><br>
@@ -2780,6 +3126,78 @@ function createSettingsUI() {
       });
     });
   }
+
+  // Feature Info Buttons (Mobile) - für Kalte Deals, Teure Deals, Händler im Titel, Sucheinstellungen
+  const featureInfoButtons = document.querySelectorAll(".feature-info-btn");
+  featureInfoButtons.forEach((button) => {
+    button.addEventListener("click", (e) => {
+      e.stopPropagation();
+
+      const infoText = button.getAttribute("data-info");
+
+      // Erstelle Info-Overlay
+      const infoOverlay = document.createElement("div");
+      infoOverlay.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.8);
+        z-index: 10000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+      `;
+
+      const infoBox = document.createElement("div");
+      infoBox.style.cssText = `
+        background: ${colors.contentBg};
+        color: ${colors.text};
+        border-radius: 12px;
+        padding: 20px;
+        max-width: 400px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+      `;
+
+      infoBox.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+          <h3 style="margin: 0; font-size: 18px; color: ${colors.text};">ℹ️ Information</h3>
+          <button id="closeInfoButton" style="
+            background: ${colors.buttonBg};
+            border: 1px solid ${colors.buttonBorder};
+            color: ${colors.text};
+            border-radius: 50%;
+            width: 32px;
+            height: 32px;
+            cursor: pointer;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          ">✕</button>
+        </div>
+
+        <div style="font-size: 14px; line-height: 1.6;">
+          ${infoText}
+        </div>
+      `;
+
+      infoOverlay.appendChild(infoBox);
+      document.body.appendChild(infoOverlay);
+
+      // Schließen-Handler
+      const closeInfo = () => {
+        infoOverlay.remove();
+      };
+
+      document.getElementById("closeInfoButton").addEventListener("click", closeInfo);
+      infoOverlay.addEventListener("click", (e) => {
+        if (e.target === infoOverlay) closeInfo();
+      });
+    });
+  });
 
   // Click Outside Handler anpassen
   createSuggestionClickHandler();
@@ -2908,31 +3326,6 @@ function createSettingsUI() {
   setupClickOutsideHandler();
 
   document
-    .getElementById("hideShareButtons")
-    ?.addEventListener("click", async (e) => {
-      // Toggle state
-      const newState = !window.hideShareButtons;
-      window.hideShareButtons = newState;
-      GM_setValue("hideShareButtons", newState);
-
-      // Update icon
-      const icon = e.currentTarget.querySelector("i");
-      if (icon) {
-        icon.className = newState ? "fas fa-eye-slash" : "fas fa-eye";
-        icon.setAttribute(
-          "aria-label",
-          newState ? "Share Buttons versteckt" : "Share Buttons sichtbar"
-        );
-      }
-
-      // Update visibility
-      updateShareButtonsVisibility(newState);
-
-      await Promise.resolve();
-      processArticles();
-    });
-
-  document
     .getElementById("hideMatchingMerchantNames")
     ?.addEventListener("click", async (e) => {
       // Toggle state
@@ -2942,6 +3335,34 @@ function createSettingsUI() {
 
       // Cache leeren da sich die Titel ändern werden
       processedDealsCache.clear();
+
+      // Bei DEAKTIVIERUNG: Sofort alle Originaltitel wiederherstellen
+      if (!newState && ORIGINAL_TITLES.size > 0) {
+        ORIGINAL_TITLES.forEach((originalTitle, dealId) => {
+          const deal = document.getElementById(dealId);
+          if (deal) {
+            const titleLink = deal.querySelector(".thread-title a");
+            if (titleLink) {
+              titleLink.textContent = originalTitle;
+              titleLink.setAttribute("title", originalTitle);
+            }
+          }
+        });
+        if (DEBUG.hideMatchingMerchantNames) {
+          console.log(`[${getDebugTimestamp()}] [MDM MerchantNames] Restored ${ORIGINAL_TITLES.size} original titles immediately`);
+        }
+      }
+
+      // ORIGINAL_TITLES IMMER leeren (bei Aktivierung UND Deaktivierung)
+      // Damit werden Deals beim nächsten processArticles() neu verarbeitet
+      ORIGINAL_TITLES.clear();
+
+      if (DEBUG.hideMatchingMerchantNames) {
+        console.log(`[${getDebugTimestamp()}] [MDM MerchantNames] Feature toggled, ORIGINAL_TITLES cleared:`, {
+          newState,
+          reason: "Force re-processing of all deals with new setting"
+        });
+      }
 
       // Update icon
       const icon = e.currentTarget.querySelector("i");
@@ -3416,7 +3837,8 @@ function createMerchantListUI() {
                         padding: 8px 12px;
                         background: none;
                         border: none;
-                        color: ${colors.text};
+                        color: ${sortState.mode === 'alphabetical' && sortState.ascending === true ? '#4cb748' : colors.text};
+                        font-weight: ${sortState.mode === 'alphabetical' && sortState.ascending === true ? 'bold' : 'normal'};
                         cursor: pointer;
                         display: flex;
                         align-items: center;
@@ -3432,7 +3854,8 @@ function createMerchantListUI() {
                         padding: 8px 12px;
                         background: none;
                         border: none;
-                        color: ${colors.text};
+                        color: ${sortState.mode === 'alphabetical' && sortState.ascending === false ? '#4cb748' : colors.text};
+                        font-weight: ${sortState.mode === 'alphabetical' && sortState.ascending === false ? 'bold' : 'normal'};
                         cursor: pointer;
                         display: flex;
                         align-items: center;
@@ -3448,7 +3871,8 @@ function createMerchantListUI() {
                         padding: 8px 12px;
                         background: none;
                         border: none;
-                        color: ${colors.text};
+                        color: ${sortState.mode === 'added' && sortState.ascending === false ? '#4cb748' : colors.text};
+                        font-weight: ${sortState.mode === 'added' && sortState.ascending === false ? 'bold' : 'normal'};
                         cursor: pointer;
                         display: flex;
                         align-items: center;
@@ -3464,7 +3888,8 @@ function createMerchantListUI() {
                         padding: 8px 12px;
                         background: none;
                         border: none;
-                        color: ${colors.text};
+                        color: ${sortState.mode === 'added' && sortState.ascending === true ? '#4cb748' : colors.text};
+                        font-weight: ${sortState.mode === 'added' && sortState.ascending === true ? 'bold' : 'normal'};
                         cursor: pointer;
                         display: flex;
                         align-items: center;
@@ -3828,7 +4253,8 @@ function createExcludeWordsUI() {
                         padding: 8px 12px;
                         background: none;
                         border: none;
-                        color: ${colors.text};
+                        color: ${sortState.mode === 'alphabetical' && sortState.ascending === true ? '#4cb748' : colors.text};
+                        font-weight: ${sortState.mode === 'alphabetical' && sortState.ascending === true ? 'bold' : 'normal'};
                         cursor: pointer;
                         display: flex;
                         align-items: center;
@@ -3844,7 +4270,8 @@ function createExcludeWordsUI() {
                         padding: 8px 12px;
                         background: none;
                         border: none;
-                        color: ${colors.text};
+                        color: ${sortState.mode === 'alphabetical' && sortState.ascending === false ? '#4cb748' : colors.text};
+                        font-weight: ${sortState.mode === 'alphabetical' && sortState.ascending === false ? 'bold' : 'normal'};
                         cursor: pointer;
                         display: flex;
                         align-items: center;
@@ -3860,7 +4287,8 @@ function createExcludeWordsUI() {
                         padding: 8px 12px;
                         background: none;
                         border: none;
-                        color: ${colors.text};
+                        color: ${sortState.mode === 'added' && sortState.ascending === false ? '#4cb748' : colors.text};
+                        font-weight: ${sortState.mode === 'added' && sortState.ascending === false ? 'bold' : 'normal'};
                         cursor: pointer;
                         display: flex;
                         align-items: center;
@@ -3876,7 +4304,8 @@ function createExcludeWordsUI() {
                         padding: 8px 12px;
                         background: none;
                         border: none;
-                        color: ${colors.text};
+                        color: ${sortState.mode === 'added' && sortState.ascending === true ? '#4cb748' : colors.text};
+                        font-weight: ${sortState.mode === 'added' && sortState.ascending === true ? 'bold' : 'normal'};
                         cursor: pointer;
                         display: flex;
                         align-items: center;
@@ -4161,54 +4590,49 @@ function createWhitelistUI() {
         timestampText = "Hinzugefügt am Unbekannt";
       }
       return `
-        <div class="whitelist-item" style="
+        <div class="word-item" style="
             display: flex;
             justify-content: space-between;
             align-items: center;
             margin-bottom: 5px;
             padding: 5px;
             background: ${colors.itemBg};
+            color: ${colors.text};
+            border: 1px solid ${colors.border};
             border-radius: 3px;
-            position: relative;
-        ">
-            <span class="whitelist-text" style="
-                flex-grow: 1;
-                cursor: ${IS_TOUCH_DEVICE ? "pointer" : "default"};
-                user-select: none;
-            " ${
-              !IS_TOUCH_DEVICE ? `title="${timestampText}"` : ""
-            }>${word}</span>
+            position: relative;">
+            <span class="word-text" style="word-break: break-word; ${
+              IS_TOUCH_DEVICE ? "cursor: pointer;" : ""
+            }" title="${timestampText}">${word}</span>
             ${
               IS_TOUCH_DEVICE
-                ? `
-                <span class="timestamp-tooltip" style="
-                    display: none;
-                    position: absolute;
-                    bottom: 100%;
-                    left: 50%;
-                    transform: translateX(-50%);
-                    background: ${colors.background};
-                    border: 1px solid ${colors.border};
-                    padding: 4px 8px;
-                    border-radius: 3px;
-                    font-size: 11px;
-                    white-space: nowrap;
-                    z-index: 1000;
-                    pointer-events: none;
-                    margin-bottom: 4px;
-                ">${timestampText}</span>
-            `
+                ? `<span class="timestamp-tooltip" style="
+                display: none;
+                position: absolute;
+                background: ${colors.background};
+                border: 1px solid ${colors.border};
+                padding: 4px 8px;
+                border-radius: 3px;
+                font-size: 11px;
+                white-space: nowrap;
+                z-index: 1000;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            ">${timestampText}</span>`
                 : ""
             }
             <button class="delete-whitelist-word" data-word="${word}" style="
                 background: none;
                 border: none;
                 cursor: pointer;
-                color: #e74c3c;
-                font-size: 16px;
-                padding: 2px 5px;
-            ">
-                <i class="fas fa-trash"></i>
+                color: ${colors.text};
+                width: 24px;
+                height: 24px;
+                display: flex;
+                align-items: center;
+                justify-content: center;">
+                <svg width="16" height="16">
+                    <use xlink:href="https://www.mydealz.de/assets/img/ico_632f5.svg#trash"></use>
+                </svg>
             </button>
         </div>
     `;
@@ -4216,102 +4640,148 @@ function createWhitelistUI() {
     .join("");
 
   window.whitelistDiv.innerHTML = `
-        <div style="
-            margin-bottom: 10px;
-        ">
-            <h3 style="margin: 0; font-size: 16px;">
-                <i class="fas fa-shield-alt"></i> Whitelist
-            </h3>
-        </div>
-
-        <div style="margin-bottom: 10px;">
-            <p style="
-                margin: 0 0 10px 0;
-                font-size: 12px;
-                color: ${colors.text};
-                opacity: 0.7;
-                line-height: 1.4;
-            ">
-                Wörter in der Whitelist schützen Deals vor dem Wortfilter.
-                <br>Beispiel: "Gewinnspiel" verhindert, dass Gewinnspiel-Deals gefiltert werden.
-            </p>
-            <div style="display: flex; gap: 5px;">
-                <input
-                    type="text"
-                    id="newWhitelistWord"
-                    placeholder="Neues Whitelist-Wort..."
-                    style="
-                        flex-grow: 1;
-                        padding: 8px;
-                        background: ${colors.inputBg};
-                        border: 1px solid ${colors.border};
-                        border-radius: 3px;
-                        color: ${colors.text};
-                    "
-                >
-                <button id="addWhitelistWord" style="
-                    padding: 8px 12px;
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <h4 style="margin: 0;">Whitelist-Wörter (${
+              currentWords.length
+            })</h4>
+            <div style="position: relative;">
+                <button id="sortWhitelistDropdown" class="sort-dropdown-btn" style="
                     background: ${colors.buttonBg};
                     border: 1px solid ${colors.buttonBorder};
-                    border-radius: 3px;
                     color: ${colors.text};
                     cursor: pointer;
-                ">
-                    <i class="fas fa-plus"></i>
-                </button>
-            </div>
-        </div>
-
-        <div style="
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 8px;
-            padding: 4px 0;
-        ">
-            <span style="font-size: 13px; opacity: 0.8;">
-                ${currentWords.length} ${
-    currentWords.length === 1 ? "Wort" : "Wörter"
-  }
-            </span>
-            <div style="display: flex; gap: 4px; align-items: center;">
-                <button id="toggleWhitelistSortMode" style="
-                    background: none;
-                    border: 1px solid ${colors.border};
+                    padding: 6px 10px;
                     border-radius: 3px;
-                    padding: 4px 8px;
-                    cursor: pointer;
-                    color: ${colors.text};
-                    font-size: 11px;
-                " title="Sortierung umschalten">
-                    <i class="fas fa-${
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                    font-size: 14px;
+                " title="Sortierung">
+                    ${
                       sortState.mode === "alphabetical"
-                        ? "sort-alpha-down"
-                        : "clock"
-                    }"></i>
-                    ${sortState.mode === "alphabetical" ? "A-Z" : "Datum"}
+                        ? '<span style="font-weight: bold;">AZ</span>'
+                        : '<i class="fas fa-clock"></i>'
+                    }
+                    <i class="fas fa-chevron-down" style="font-size: 10px; margin-left: 2px;"></i>
                 </button>
-                <button id="toggleWhitelistSortDirection" style="
-                    background: none;
+                <div id="sortWhitelistMenu" style="
+                    display: none;
+                    position: absolute;
+                    top: 100%;
+                    right: 0;
+                    margin-top: 4px;
+                    background: ${colors.background};
                     border: 1px solid ${colors.border};
                     border-radius: 3px;
-                    padding: 4px 8px;
-                    cursor: pointer;
-                    color: ${colors.text};
-                    font-size: 11px;
-                " title="Reihenfolge umkehren">
-                    <i class="fas fa-arrow-${
-                      sortState.ascending ? "up" : "down"
-                    }"></i>
-                </button>
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+                    z-index: 1000;
+                    min-width: 160px;
+                ">
+                    <button class="sort-menu-item" data-mode="alphabetical" data-asc="true" style="
+                        width: 100%;
+                        padding: 8px 12px;
+                        background: none;
+                        border: none;
+                        color: ${sortState.mode === 'alphabetical' && sortState.ascending === true ? '#4cb748' : colors.text};
+                        font-weight: ${sortState.mode === 'alphabetical' && sortState.ascending === true ? 'bold' : 'normal'};
+                        cursor: pointer;
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                        font-size: 13px;
+                        border-bottom: 1px solid ${colors.border};
+                    ">
+                        <span style="font-weight: bold; width: 20px;">AZ</span>
+                        <span style="flex: 1;">Aufsteigend</span>
+                    </button>
+                    <button class="sort-menu-item" data-mode="alphabetical" data-asc="false" style="
+                        width: 100%;
+                        padding: 8px 12px;
+                        background: none;
+                        border: none;
+                        color: ${sortState.mode === 'alphabetical' && sortState.ascending === false ? '#4cb748' : colors.text};
+                        font-weight: ${sortState.mode === 'alphabetical' && sortState.ascending === false ? 'bold' : 'normal'};
+                        cursor: pointer;
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                        font-size: 13px;
+                        border-bottom: 1px solid ${colors.border};
+                    ">
+                        <span style="font-weight: bold; width: 20px;">ZA</span>
+                        <span style="flex: 1;">Absteigend</span>
+                    </button>
+                    <button class="sort-menu-item" data-mode="added" data-asc="false" style="
+                        width: 100%;
+                        padding: 8px 12px;
+                        background: none;
+                        border: none;
+                        color: ${sortState.mode === 'added' && sortState.ascending === false ? '#4cb748' : colors.text};
+                        font-weight: ${sortState.mode === 'added' && sortState.ascending === false ? 'bold' : 'normal'};
+                        cursor: pointer;
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                        font-size: 13px;
+                        border-bottom: 1px solid ${colors.border};
+                    ">
+                        <i class="fas fa-clock" style="width: 20px;"></i>
+                        <span style="flex: 1;">Neueste zuerst</span>
+                    </button>
+                    <button class="sort-menu-item" data-mode="added" data-asc="true" style="
+                        width: 100%;
+                        padding: 8px 12px;
+                        background: none;
+                        border: none;
+                        color: ${sortState.mode === 'added' && sortState.ascending === true ? '#4cb748' : colors.text};
+                        font-weight: ${sortState.mode === 'added' && sortState.ascending === true ? 'bold' : 'normal'};
+                        cursor: pointer;
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                        font-size: 13px;
+                    ">
+                        <i class="fas fa-clock" style="width: 20px;"></i>
+                        <span style="flex: 1;">Älteste zuerst</span>
+                    </button>
+                </div>
             </div>
         </div>
-
-        <div style="max-height: 300px; overflow-y: auto;">
-            ${
-              wordsListHTML ||
-              '<p style="text-align: center; opacity: 0.5;">Keine Einträge</p>'
-            }
+        <input type="text" id="whitelistSearch" placeholder="Wörter suchen..."
+            style="
+                width: 100%;
+                padding: 5px;
+                margin-bottom: 10px;
+                background: ${colors.inputBg};
+                border: 1px solid ${colors.border};
+                color: ${colors.text};
+                border-radius: 3px;">
+        <div style="margin-bottom: 15px;">
+            <div id="whitelistWordsList" style="
+                margin-bottom: 10px;
+                max-height: 60vh;
+                overflow-y: auto;
+                padding-right: 5px;
+                touch-action: pan-y;
+                -webkit-overflow-scrolling: touch;">
+                ${wordsListHTML}
+            </div>
+            <button id="clearWhitelistButton" style="
+                width: 100%;
+                padding: 5px 10px;
+                background: ${colors.buttonBg};
+                border: 1px solid ${colors.buttonBorder};
+                color: ${colors.text};
+                border-radius: 3px;
+                cursor: pointer;
+                margin-top: 10px;">
+                <span style="display: flex; align-items: center; justify-content: center; gap: 8px;">
+                    <svg width="16" height="16">
+                        <use xlink:href="https://www.mydealz.de/assets/img/ico_632f5.svg#trash"></use>
+                    </svg>
+                    Alle Wörter entfernen
+                </span>
+            </button>
         </div>
         <div style="
             margin-top: 20px;
@@ -4326,6 +4796,7 @@ function createWhitelistUI() {
 
   document.body.appendChild(window.whitelistDiv);
   activeSubUI = "whitelist";
+  setupClickOutsideHandler();
 
   // Nach dem Hinzufügen zum DOM den Button anpassen
   document.getElementById("closeWhitelistButton").style.cssText = `
@@ -4336,14 +4807,125 @@ function createWhitelistUI() {
         text-align: center;
     `;
 
-  // Touch-Handler für Timestamps
+  // Sortier-Dropdown Event-Listener
+  const whitelistDropdownBtn = document.getElementById("sortWhitelistDropdown");
+  const whitelistDropdownMenu = document.getElementById("sortWhitelistMenu");
+
+  whitelistDropdownBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    whitelistDropdownMenu.style.display =
+      whitelistDropdownMenu.style.display === "none" ? "block" : "none";
+  });
+
+  // Schließe Dropdown bei Klick außerhalb
+  const closeWhitelistDropdown = (e) => {
+    if (
+      !whitelistDropdownBtn.contains(e.target) &&
+      !whitelistDropdownMenu.contains(e.target)
+    ) {
+      whitelistDropdownMenu.style.display = "none";
+    }
+  };
+  document.addEventListener("click", closeWhitelistDropdown);
+
+  // Menü-Items Event-Listener
+  whitelistDropdownMenu.querySelectorAll(".sort-menu-item").forEach((item) => {
+    item.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const mode = item.dataset.mode;
+      const ascending = item.dataset.asc === "true";
+      listSortStates.whitelist.mode = mode;
+      listSortStates.whitelist.ascending = ascending;
+      document.removeEventListener("click", closeWhitelistDropdown);
+      // UI neu aufbauen ohne activeSubUI zu ändern
+      const oldDiv = window.whitelistDiv;
+      if (oldDiv && oldDiv.parentNode) {
+        oldDiv.parentNode.removeChild(oldDiv);
+      }
+      createWhitelistUI();
+    });
+    // Hover-Effekt
+    item.addEventListener("mouseenter", () => {
+      item.style.background = colors.itemBg;
+    });
+    item.addEventListener("mouseleave", () => {
+      item.style.background = "none";
+    });
+  });
+
+  // Add search functionality
+  const searchInput = document.getElementById("whitelistSearch");
+  searchInput.addEventListener("input", (e) => {
+    const searchTerm = e.target.value.toLowerCase();
+    let visibleCount = 0;
+    const currentWords = loadWhitelistWords();
+    const totalCount = currentWords.length;
+
+    document.querySelectorAll(".word-item").forEach((item) => {
+      const word = item.querySelector("span").textContent.toLowerCase();
+      const isVisible = word.includes(searchTerm);
+      item.style.display = isVisible ? "flex" : "none";
+      if (isVisible) visibleCount++;
+    });
+
+    // Update heading counter
+    const heading = window.whitelistDiv.querySelector("h4");
+    if (heading) {
+      heading.textContent = searchTerm
+        ? `Whitelist-Wörter (${visibleCount}/${totalCount})`
+        : `Whitelist-Wörter (${totalCount})`;
+    }
+  });
+
+  // Alle Wörter entfernen Button
+  document
+    .getElementById("clearWhitelistButton")
+    .addEventListener("click", () => {
+      if (
+        confirm("Möchten Sie wirklich alle Wörter aus der Whitelist entfernen?")
+      ) {
+        saveWhitelistWords([]);
+        whitelistAddedAt = {};
+        GM_setValue("whitelistAddedAt", whitelistAddedAt);
+        document.getElementById("whitelistWordsList").innerHTML = "";
+        whitelistWords = [];
+        processArticles();
+
+        // Immediately update counter in heading
+        const heading = window.whitelistDiv.querySelector("h4");
+        if (heading) {
+          heading.textContent = "Whitelist-Wörter (0)";
+        }
+      }
+    });
+
+  // Add delete handlers
+  document.querySelectorAll(".delete-whitelist-word").forEach((button) => {
+    button.addEventListener("click", function (e) {
+      e.stopPropagation();
+      const word = button.dataset.word;
+      const currentList = loadWhitelistWords();
+      const filtered = currentList.filter((w) => w !== word);
+      saveWhitelistWords(filtered);
+
+      // Remove normalized timestamp
+      const normalized = normalizeForSearch(word);
+      delete whitelistAddedAt[normalized];
+      GM_setValue("whitelistAddedAt", whitelistAddedAt);
+
+      createWhitelistUI();
+    });
+  });
+
+  // Touch-Handler für Timestamp-Anzeige auf mobilen Geräten
   if (IS_TOUCH_DEVICE) {
-    const whitelistTexts =
-      window.whitelistDiv.querySelectorAll(".whitelist-text");
-    whitelistTexts.forEach((whitelistText) => {
-      whitelistText.addEventListener("click", function (e) {
+    const wordTexts = document.querySelectorAll(".word-text");
+
+    wordTexts.forEach((wordText) => {
+      wordText.addEventListener("click", function (e) {
         e.stopPropagation();
         const tooltip = this.nextElementSibling;
+
         if (tooltip && tooltip.classList.contains("timestamp-tooltip")) {
           // Check visibility BEFORE hiding all tooltips
           const computedDisplay = window.getComputedStyle(tooltip).display;
@@ -4356,11 +4938,14 @@ function createWhitelistUI() {
 
           // Show this tooltip only if it wasn't visible before
           if (!isVisible) {
-            const item = this.closest(".whitelist-item");
+            // Positioniere Tooltip dynamisch: oben oder unten
+            const item = this.closest(".word-item");
             const itemRect = item.getBoundingClientRect();
-            const tooltipHeight = 30;
-            const spaceAbove = itemRect.top;
-            const spaceBelow = window.innerHeight - itemRect.bottom;
+            const container = document.getElementById("whitelistWordsList");
+            const containerRect = container.getBoundingClientRect();
+            const tooltipHeight = 30; // Geschätzte Höhe
+            const spaceAbove = itemRect.top - containerRect.top;
+            const spaceBelow = containerRect.bottom - itemRect.bottom;
 
             if (spaceAbove < tooltipHeight && spaceBelow > tooltipHeight) {
               tooltip.style.bottom = "auto";
@@ -4380,66 +4965,13 @@ function createWhitelistUI() {
     });
   }
 
-  // Event Listeners
+  // Close button handler
   document
     .getElementById("closeWhitelistButton")
     .addEventListener("click", (e) => {
       e.stopPropagation();
       closeActiveSubUI();
     });
-
-  document.getElementById("addWhitelistWord").addEventListener("click", () => {
-    const input = document.getElementById("newWhitelistWord");
-    const word = input.value.trim();
-    if (word) {
-      const currentList = loadWhitelistWords();
-      if (!currentList.some((w) => w.toLowerCase() === word.toLowerCase())) {
-        currentList.push(word);
-        saveWhitelistWords(currentList, true);
-        createWhitelistUI();
-      }
-      input.value = "";
-    }
-  });
-
-  document
-    .getElementById("newWhitelistWord")
-    .addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        document.getElementById("addWhitelistWord").click();
-      }
-    });
-
-  document
-    .getElementById("toggleWhitelistSortMode")
-    .addEventListener("click", () => {
-      sortState.mode =
-        sortState.mode === "alphabetical" ? "added" : "alphabetical";
-      createWhitelistUI();
-    });
-
-  document
-    .getElementById("toggleWhitelistSortDirection")
-    .addEventListener("click", () => {
-      sortState.ascending = !sortState.ascending;
-      createWhitelistUI();
-    });
-
-  window.whitelistDiv
-    .querySelectorAll(".delete-whitelist-word")
-    .forEach((btn) => {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        const word = btn.dataset.word;
-        const currentList = loadWhitelistWords();
-        const filtered = currentList.filter((w) => w !== word);
-        saveWhitelistWords(filtered);
-        createWhitelistUI();
-      });
-    });
-
-  setupClickOutsideHandler();
 }
 
 // Blockierte Benutzer UI erstellen
@@ -4458,15 +4990,30 @@ function createBlockedUsersUI() {
         color: ${colors.text};
     `;
 
-  // Lade blockierte Benutzer
-  const loadedUsers = GM_getValue("blockedUsers", []);
-  ensureUserTimestamps(loadedUsers, false);
+  // Lade blockierte Benutzer (Object-Format)
+  const blockedUsersObj = GM_getValue("blockedUsers", {});
+
+  // Konvertiere Object zu Array für Sortierung (displayName)
+  const loadedUsers = Object.values(blockedUsersObj).map(user => {
+    // Fallback für alte Array-Einträge (nur String)
+    if (typeof user === 'string') {
+      return { displayName: user, normalizedUsername: user.toLowerCase() };
+    }
+    return user;
+  });
+
+  ensureUserTimestamps(loadedUsers.map(u => u.normalizedUsername), false);
   const sortState = listSortStates.users;
   const blockedUsers = sortFilterList(
-    loadedUsers,
+    loadedUsers.map(u => u.normalizedUsername),
     sortState.mode,
     sortState.ascending
-  );
+  ).map(normalizedKey => {
+    // Finde Original-Objekt für displayName
+    const userObj = loadedUsers.find(u => u.normalizedUsername === normalizedKey);
+    return userObj || { displayName: normalizedKey, normalizedUsername: normalizedKey };
+  });
+
   if (DEBUG.userBlocking) {
     console.log(
       "[MDM UserBlock] Loading blocked users UI, count:",
@@ -4477,8 +5024,9 @@ function createBlockedUsersUI() {
   }
 
   const blockedUsersHTML = blockedUsers
-    .map((user) => {
-      const key = (user || "").toLowerCase();
+    .map((userObj) => {
+      const key = userObj.normalizedUsername;
+      const displayName = userObj.displayName;
       let timestampText;
       if (key && userAddedAt[key]) {
         const data = userAddedAt[key];
@@ -4509,7 +5057,7 @@ function createBlockedUsersUI() {
             position: relative;">
             <span class="user-text" style="${
               IS_TOUCH_DEVICE ? "cursor: pointer;" : ""
-            }" title="${timestampText}">${user}</span>
+            }" title="${timestampText}">${displayName}</span>
             ${
               IS_TOUCH_DEVICE
                 ? `<span class="timestamp-tooltip" style="
@@ -4526,7 +5074,7 @@ function createBlockedUsersUI() {
             ">${timestampText}</span>`
                 : ""
             }
-            <button class="delete-user" data-user="${user}" style="
+            <button class="delete-user" data-user="${key}" style="
                 background: none;
                 border: none;
                 cursor: pointer;
@@ -4588,7 +5136,8 @@ function createBlockedUsersUI() {
                         padding: 8px 12px;
                         background: none;
                         border: none;
-                        color: ${colors.text};
+                        color: ${sortState.mode === 'alphabetical' && sortState.ascending === true ? '#4cb748' : colors.text};
+                        font-weight: ${sortState.mode === 'alphabetical' && sortState.ascending === true ? 'bold' : 'normal'};
                         cursor: pointer;
                         display: flex;
                         align-items: center;
@@ -4604,7 +5153,8 @@ function createBlockedUsersUI() {
                         padding: 8px 12px;
                         background: none;
                         border: none;
-                        color: ${colors.text};
+                        color: ${sortState.mode === 'alphabetical' && sortState.ascending === false ? '#4cb748' : colors.text};
+                        font-weight: ${sortState.mode === 'alphabetical' && sortState.ascending === false ? 'bold' : 'normal'};
                         cursor: pointer;
                         display: flex;
                         align-items: center;
@@ -4620,7 +5170,8 @@ function createBlockedUsersUI() {
                         padding: 8px 12px;
                         background: none;
                         border: none;
-                        color: ${colors.text};
+                        color: ${sortState.mode === 'added' && sortState.ascending === false ? '#4cb748' : colors.text};
+                        font-weight: ${sortState.mode === 'added' && sortState.ascending === false ? 'bold' : 'normal'};
                         cursor: pointer;
                         display: flex;
                         align-items: center;
@@ -4636,7 +5187,8 @@ function createBlockedUsersUI() {
                         padding: 8px 12px;
                         background: none;
                         border: none;
-                        color: ${colors.text};
+                        color: ${sortState.mode === 'added' && sortState.ascending === true ? '#4cb748' : colors.text};
+                        font-weight: ${sortState.mode === 'added' && sortState.ascending === true ? 'bold' : 'normal'};
                         cursor: pointer;
                         display: flex;
                         align-items: center;
@@ -4786,7 +5338,7 @@ function createBlockedUsersUI() {
       if (
         confirm("Möchten Sie wirklich alle Benutzer aus der Liste entfernen?")
       ) {
-        GM_setValue("blockedUsers", []);
+        GM_setValue("blockedUsers", {});
         userAddedAt = {};
         GM_setValue("userAddedAt", userAddedAt);
         document.getElementById("usersList").innerHTML = "";
@@ -4808,11 +5360,11 @@ function createBlockedUsersUI() {
 
       const userToDelete = button.dataset.user;
       const userItem = button.closest(".user-item");
-      const blockedUsers = GM_getValue("blockedUsers", []);
+      const blockedUsers = GM_getValue("blockedUsers", {});
 
-      // Update blockedUsers array
-      const updatedUsers = blockedUsers.filter((user) => user !== userToDelete);
-      GM_setValue("blockedUsers", updatedUsers);
+      // Delete user from object (userToDelete is already normalized)
+      delete blockedUsers[userToDelete];
+      GM_setValue("blockedUsers", blockedUsers);
 
       const normalized = (userToDelete || "").toLowerCase();
       if (normalized && userAddedAt[normalized]) {
@@ -4822,12 +5374,12 @@ function createBlockedUsersUI() {
 
       // Update UI
       userItem.remove();
-      processArticles();
+      processArticles(true); // forceRun=true um Early Exit zu überspringen
 
       // Update counter in heading
       const heading = blockedUsersDiv.querySelector("h4");
       if (heading) {
-        heading.textContent = `Ausgeblendete Benutzer (${updatedUsers.length})`;
+        heading.textContent = `Ausgeblendete Benutzer (${Object.keys(blockedUsers).length})`;
       }
     });
   });
@@ -5126,27 +5678,6 @@ function updateSuggestionList() {
     window.removeEventListener("scroll", updatePosition, true);
     window.removeEventListener("resize", updatePosition);
   };
-}
-
-// Share-Buttons Ein-/Ausblenden
-function updateShareButtonsVisibility(hide) {
-  const styleId = "mdm-hide-share-buttons-style";
-  let styleElement = document.getElementById(styleId);
-
-  if (hide) {
-    if (!styleElement) {
-      styleElement = document.createElement("style");
-      styleElement.id = styleId;
-      styleElement.textContent = `
-                button[data-t="shareBtn"] {
-                    display: none !important;
-                }
-            `;
-      document.head.appendChild(styleElement);
-    }
-  } else if (styleElement) {
-    styleElement.remove();
-  }
 }
 
 // === Event-Handler ===
@@ -5757,6 +6288,24 @@ function closeActiveSubUI() {
 const MAX_CACHE_SIZE = 500; // Max 500 Deals im Cache
 const processedDealsCache = new Map();
 
+// Hash über Filter-Inhalte für Cache-Invalidierung
+let excludeWordsHash = 0;
+let blockedUsersHash = 0; // Tracking für blockedUsers-Änderungen
+
+function simpleHash(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  return hash;
+}
+
+// Timeout-Tracking für Vue3 Re-Checks (verhindert mehrfache Timeouts pro Deal)
+const vue3RecheckScheduled = new Set();
+const vue3RecheckTimeouts = new Map(); // Speichert Timeout-IDs zum Abbrechen
+
 // DEBUG: Cache global verfügbar machen (nur für Debugging)
 if (typeof unsafeWindow !== "undefined") {
   unsafeWindow.processedDealsCache = processedDealsCache;
@@ -5788,28 +6337,148 @@ function addToDealCache(key, value) {
 }
 
 // Artikel verarbeiten und filtern
-function processArticles() {
+function processArticles(forceRun = false) {
+  // Prüfe ob sich Filter geändert haben (wichtig für Early Exit)
+  let blockedUsersObj = GM_getValue("blockedUsers", {});
+  const currentBlockedUsersHash = simpleHash(Object.keys(blockedUsersObj).sort().join('|'));
+  const blockedUsersChanged = currentBlockedUsersHash !== blockedUsersHash;
+
+  // Prüfe ob sich Wortfilter geändert haben
+  const currentExcludeWordsHash = simpleHash(excludeWords.join('|'));
+  const excludeWordsChanged = currentExcludeWordsHash !== excludeWordsHash;
+
+  const filtersChanged = blockedUsersChanged || excludeWordsChanged;
+
+  if (filtersChanged) {
+    // Filter haben sich geändert - Cache leeren und Hash aktualisieren
+    if (blockedUsersChanged) {
+      blockedUsersHash = currentBlockedUsersHash;
+    }
+    if (excludeWordsChanged) {
+      excludeWordsHash = currentExcludeWordsHash;
+    }
+    processedDealsCache.clear();
+    if (DEBUG.wordFilter) {
+      console.log('[MDM WordFilter] 🔄 Filter changed, cache cleared:', {
+        blockedUsersChanged,
+        excludeWordsChanged,
+        newBlockedUsersHash: blockedUsersHash,
+        newExcludeWordsHash: excludeWordsHash
+      });
+    }
+  }
+
+  // EARLY EXIT: Redundante Batches vermeiden (nur wenn Optimierungen aktiv)
+  // Prüfung VOR dem Abruf der deals, um DOM-Query zu sparen
+  const now = Date.now();
+  const currentDealsInDOM = document.querySelectorAll(
+    "article.thread--deal, article.thread--voucher"
+  ).length;
+
+  if (
+    !forceRun && // ⚡ forceRun überspringt Early Exit (z.B. nach User-Block)
+    !DEBUG.disableOptimizations && // 🔍 Optimierungen können deaktiviert werden
+    currentDealsInDOM === lastProcessArticlesDealCount && // Keine neuen Deals geladen
+    !merchantLinksChangedSinceLastBatch && // Keine Merchant-Links-Änderungen
+    !filtersChanged // Keine Filter-Änderungen (Wortfilter, User-Blocklist)
+  ) {
+    // Early Exit: Nur verarbeiten wenn sich etwas RELEVANT ändert
+    // Zeitstempel-Updates ("Läuft ab in...") sind irrelevant → Skip
+    // Zeit spielt KEINE Rolle - nur dealCount und merchantLinks zählen
+    if (DEBUG.delayDebug || DEBUG.wordFilter) {
+      console.log(
+        `[${getDebugTimestamp()}] ⚠️ [EARLY EXIT] Batch SKIPPED:`,
+        {
+          forceRun,
+          dealCount: currentDealsInDOM,
+          lastDealCount: lastProcessArticlesDealCount,
+          merchantLinksChanged: merchantLinksChangedSinceLastBatch,
+          filtersChanged,
+          timeSinceLastBatch: `${Math.round((now-lastProcessArticlesTime)/1000)}s`,
+          reason: 'No relevant changes (dealCount + merchantLinks + filters unchanged)'
+        }
+      );
+    }
+    return; // Sofort abbrechen - keine DOM-Traversal, keine Filter
+  }
+
+  // Log wenn wir NICHT skippen
+  if (DEBUG.wordFilter) {
+    console.log(
+      `[${getDebugTimestamp()}] ✅ [PROCESSING] Batch EXECUTING:`,
+      {
+        forceRun,
+        dealCount: currentDealsInDOM,
+        dealCountChanged: currentDealsInDOM !== lastProcessArticlesDealCount,
+        merchantLinksChanged: merchantLinksChangedSinceLastBatch,
+        filtersChanged,
+        timeSinceLastBatch: `${Math.round((now-lastProcessArticlesTime)/1000)}s`
+      }
+    );
+  }
+
+  // Reset für diesen Run
+  merchantLinksChangedSinceLastBatch = false;
+  lastProcessArticlesTime = now;
+  lastProcessArticlesDealCount = currentDealsInDOM;
+
+  if (DEBUG.delayDebug) {
+    console.log(
+      `[${getDebugTimestamp()}] ✅ [DELAY DEBUG] Batch EXECUTING:`,
+      {
+        dealCount: currentDealsInDOM,
+        timeSinceLastBatch: `${Math.round((now-lastProcessArticlesTime)/1000)}s`
+      }
+    );
+  }
+
+  if (DEBUG.priceFilter) {
+    console.log(`[${getDebugTimestamp()}] [MDM PriceFilter] 🔄 processArticles() called, maxPrice=`, maxPrice);
+  }
+
   perfTracker.start("processArticles");
   perfTracker.update("processArticles.calls", 1);
   perfTracker.resetBatch();
+
+  // Batch-Tracking für Vue3-Defers und Performance-Messung
+  let vue3DeferredCount = 0;
+  const batchStartTime = performance.now();
+  let firstTitleUpdateTime = null;
+
+  // Tracking für Delayed Re-Check Optimierung
+  let dealsWithoutMerchantId = 0;
+
+  // MerchantFilter Batch-Tracking
+  let merchantFilterCheckedCount = 0;
+  let merchantFilterHiddenCount = 0;
+  const merchantFilterPerDealDebug = false; // Lokale Variable für sehr detaillierte Logs
 
   // Observer temporär deaktivieren um DOM-Mutations-Loops zu vermeiden
   if (typeof combinedObserver !== 'undefined' && combinedObserver) {
     combinedObserver.disconnect();
   }
 
-  if (DEBUG.hideMatchingMerchantNames) {
-    console.log("[MDM MerchantNames] processArticles started - Feature state:", {
+  // Log nur beim ersten Aufruf pro Batch (nicht bei jedem Observer-Callback)
+  if (DEBUG.hideMatchingMerchantNames && perfTracker.metrics.processArticles.calls === 1) {
+    console.log(`[${getDebugTimestamp()}] [MDM MerchantNames] processArticles batch started - Feature state:`, {
       enabled: window.hideMatchingMerchantNames,
       debugEnabled: DEBUG.hideMatchingMerchantNames
     });
   }
 
-  // Lade blockierte Benutzer für die Filterung
-  const blockedUsers = GM_getValue("blockedUsers", []);
+  // Lade blockierte Benutzer für die Filterung (Object-Format)
+  blockedUsersObj = GM_getValue("blockedUsers", {});
+  const blockedUsers = Object.keys(blockedUsersObj); // Nur normalized keys
+
   if (DEBUG.userBlocking) {
+    console.log('[MDM UserBlock] [processArticles] Loaded blocked users:', {
+      blockedUsersObj,
+      blockedUsers,
+      count: blockedUsers.length
+    });
+
     console.log(
-      "[MDM UserBlock] Processing articles, blocked users:",
+      '[MDM UserBlock] Processing articles, blocked users:',
       blockedUsers
     );
   }
@@ -5838,16 +6507,7 @@ function processArticles() {
     }
   }
 
-  if (DEBUG.wordFilter && processedDealsCache.size > 0) {
-    console.log(`[${getDebugTimestamp()}] [MDM Cache] Cache status at processArticles START:`, {
-      url: window.location.href,
-      cacheSize: processedDealsCache.size,
-      sampleKeys: Array.from(processedDealsCache.keys()).slice(0, 3),
-      hideMatchingMerchantNamesActive: window.hideMatchingMerchantNames,
-      originalTitlesSize: ORIGINAL_TITLES.size,
-      sampleOriginalTitles: Array.from(ORIGINAL_TITLES.keys()).slice(0, 3)
-    });
-  }
+  // Cache status logging entfernt - nur bei DEBUG.performance.caching nötig
 
   // Batch DOM-Updates für bessere Performance
   const dealsToHide = [];
@@ -5855,25 +6515,102 @@ function processArticles() {
 
   deals.forEach((deal) => {
     const dealId = deal.getAttribute("id") || "";
+    const isCurrentlyHidden = deal.classList.contains("mydealz-manager-hidden");
 
+    if (DEBUG.priceFilter) {
+      console.log(`[MDM] 🔍 Processing deal:`, {
+        dealId,
+        isHidden: isCurrentlyHidden,
+        dataHidden: deal.getAttribute("data-hidden-by-mydealz-manager")
+      });
+    }
+
+    // Prüfe ob Deal manuell versteckt wurde (hat Vorrang)
     if (hiddenDeals.includes(dealId)) {
-      dealsToHide.push({ deal, reason: "manually-hidden" });
+      if (!isCurrentlyHidden) {
+        dealsToHide.push({ deal, reason: "manually-hidden" });
+      }
       return;
     }
 
     // Prüfe ob Deal von blockiertem Benutzer
     if (blockedUsers.length > 0) {
-      // Normalisiere blockierte User zu Kleinbuchstaben für Vergleich
-      const normalizedBlockedUsers = blockedUsers.map((u) => u.toLowerCase());
+      // blockedUsers enthält bereits normalized keys (lowercase)
 
-      // Methode 1: data-md-author Attribut
-      let username = deal.getAttribute("data-md-author");
+      if (DEBUG.userBlocking) {
+        console.log("[MDM UserBlock] [processArticles] Checking deal:", {
+          dealId,
+          blockedUsersCount: blockedUsers.length,
+          blockedUsersList: blockedUsers
+        });
+      }
+
+      let username = null;
+
+      // Methode 0: data-vue3 JSON (funktioniert auch vor Vue-Rendering)
+      const vueDiv = deal.querySelector('.js-vue3[data-vue3]');
+      if (vueDiv) {
+        try {
+          const vueDataAttr = vueDiv.getAttribute('data-vue3');
+          if (vueDataAttr) {
+            // HTML-Entities dekodieren
+            const decodedJson = vueDataAttr
+              .replace(/&quot;/g, '"')
+              .replace(/&amp;/g, '&')
+              .replace(/&lt;/g, '<')
+              .replace(/&gt;/g, '>');
+            const vueData = JSON.parse(decodedJson);
+
+            // Username aus dem JSON extrahieren (Pfad: thread.user.username)
+            const threadData = vueData?.props?.thread;
+            if (threadData?.user?.username) {
+              username = threadData.user.username;
+              if (DEBUG.userBlocking) {
+                console.log("[MDM UserBlock] [processArticles] Method 0 (data-vue3 JSON):", {
+                  dealId,
+                  username,
+                  found: true,
+                  source: "thread.user.username"
+                });
+              }
+            }
+          }
+        } catch (e) {
+          if (DEBUG.userBlocking) {
+            console.log("[MDM UserBlock] [processArticles] Method 0 (data-vue3 JSON) - Parse failed:", {
+              dealId,
+              error: e.message
+            });
+          }
+        }
+      }
+
+      // Methode 1: data-md-author Attribut (nur nach Vue-Rendering verfügbar)
+      if (!username) {
+        username = deal.getAttribute("data-md-author");
+        if (username) {
+          if (DEBUG.userBlocking) {
+            console.log("[MDM UserBlock] [processArticles] Method 1 (data-md-author):", {
+              dealId,
+              username,
+              found: true
+            });
+          }
+        }
+      }
 
       // Methode 2: User-Link
       if (!username) {
         const userLink = deal.querySelector('a[data-t="userLink"]');
         if (userLink) {
           username = userLink.textContent.trim();
+          if (DEBUG.userBlocking) {
+            console.log("[MDM UserBlock] [processArticles] Method 2 (userLink):", {
+              dealId,
+              username,
+              found: true
+            });
+          }
         }
       }
 
@@ -5888,20 +6625,67 @@ function processArticles() {
           );
           if (match && match[1]) {
             username = match[1];
+            if (DEBUG.userBlocking) {
+              console.log("[MDM UserBlock] [processArticles] Method 3 (span text):", {
+                dealId,
+                username,
+                found: true
+              });
+            }
           }
         }
       }
 
       if (username) {
         const normalizedUsername = username.toLowerCase();
-        if (normalizedBlockedUsers.includes(normalizedUsername)) {
+        if (DEBUG.userBlocking) {
+          console.log("[MDM UserBlock] [processArticles] Username comparison:", {
+            dealId,
+            username,
+            normalizedUsername,
+            blockedUsers,
+            isBlocked: blockedUsers.includes(normalizedUsername)
+          });
+        }
+
+        if (blockedUsers.includes(normalizedUsername)) {
+          console.log("[MDM UserBlock] [processArticles] ✅ HIDING deal from blocked user:", {
+            dealId,
+            username: normalizedUsername,
+          });
+          dealsToHide.push({ deal, reason: `blocked-user:${normalizedUsername}` });
+          return;
+        } else {
           if (DEBUG.userBlocking) {
-            console.log("[MDM UserBlock] Hiding deal from blocked user:", {
+            console.log("[MDM UserBlock] [processArticles] ❌ NOT hiding deal, user not in blocklist:", {
               dealId,
-              username: normalizedUsername,
+              normalizedUsername,
+              blockedUsers
             });
           }
-          dealsToHide.push({ deal, reason: `blocked-user:${normalizedUsername}` });
+          // User ist NICHT geblockt - wenn Deal wegen THIS USER versteckt wurde, wieder anzeigen
+          if (isCurrentlyHidden) {
+            const hideReason = deal.getAttribute("data-hide-reason") || "";
+            // NUR anzeigen wenn Deal wegen DIESEM User versteckt wurde, NICHT bei anderen Gründen
+            if (hideReason === `blocked-user:${normalizedUsername}`) {
+              dealsToShow.push({ deal, reason: "user-unblocked" });
+              return;
+            }
+          }
+        }
+      } else {
+        console.log("[MDM UserBlock] [processArticles] ⚠️ NO username found for deal:", dealId);
+      }
+    } else {
+      if (DEBUG.userBlocking) {
+        console.log("[MDM UserBlock] [processArticles] ⚠️ blockedUsers list is EMPTY");
+      }
+      // Keine blockierten User - wenn Deal wegen "blocked-user" versteckt war, wieder anzeigen
+      if (isCurrentlyHidden && deal.getAttribute("data-hidden-by-mydealz-manager") === "true") {
+        const hideReason = deal.getAttribute("data-hide-reason") || "";
+        // NUR anzeigen wenn Deal wegen blockiertem User versteckt wurde, NICHT bei anderen Gründen (word-filter etc.)
+        if (hideReason.startsWith("blocked-user:")) {
+          dealsToShow.push({ deal, reason: "no-blocked-users" });
           return;
         }
       }
@@ -5934,7 +6718,9 @@ function processArticles() {
       const merchantInfo = getArticleMerchantInfo(deal);
       const { merchantId, merchantName } = merchantInfo;
 
-      if (DEBUG.merchantFilter) {
+      merchantFilterCheckedCount++;
+
+      if (DEBUG.merchantFilter && merchantFilterPerDealDebug) {
         console.log(`[${getDebugTimestamp()}] [MDM MerchantFilter] Checking deal:`, {
           dealId,
           merchantId,
@@ -5946,11 +6732,14 @@ function processArticles() {
       }
 
       if (merchantId && excludeMerchantsCache.ids.has(String(merchantId))) {
+        merchantFilterHiddenCount++;
         if (DEBUG.merchantFilter) {
-          console.log(`[${getDebugTimestamp()}] [MDM MerchantFilter] ✂️ MATCH by ID - Deal will be HIDDEN:`, {
+          console.log(`[${getDebugTimestamp()}] [MDM MerchantFilter] ⛔ Hiding deal due to merchant match:`, {
             dealId,
             merchantId,
-            merchantName
+            merchantName,
+            matchType: "id",
+            matchValue: merchantId
           });
         }
         dealsToHide.push({ deal, reason: `merchant-id:${merchantId}` });
@@ -5964,43 +6753,115 @@ function processArticles() {
         normalizedMerchantName &&
         excludeMerchantsCache.normalizedNames.has(normalizedMerchantName)
       ) {
+        merchantFilterHiddenCount++;
         if (DEBUG.merchantFilter) {
-          console.log(`[${getDebugTimestamp()}] [MDM MerchantFilter] ✂️ MATCH by Name - Deal will be HIDDEN:`, {
+          console.log(`[${getDebugTimestamp()}] [MDM MerchantFilter] ⛔ Hiding deal due to merchant match:`, {
             dealId,
+            merchantId,
             merchantName,
-            normalizedMerchantName
+            matchType: "name",
+            matchValue: normalizedMerchantName
           });
         }
         dealsToHide.push({ deal, reason: `merchant-name:${merchantName}` });
         return;
       }
 
-      if (DEBUG.merchantFilter && (merchantId || merchantName)) {
-        console.log(`[${getDebugTimestamp()}] [MDM MerchantFilter] ✓ No match - Deal will be SHOWN:`, {
-          dealId,
-          merchantId,
-          merchantName
-        });
+      // Tracking: Deal ohne merchantId zählen (für Delayed Re-Check Optimierung)
+      if (!merchantId) {
+        dealsWithoutMerchantId++;
       }
     }
 
-    // WICHTIG: Händlernamen-Feature MUSS VOR Cache-Check laufen!
+    // WICHTIG: Vue3-Check ZUERST! Verhindert, dass Titel-Änderungen von Vue überschrieben werden
+    // Vue rendert Deals asynchron - wir müssen warten, bis der Render-Prozess abgeschlossen ist
+    const vue3Container = deal.querySelector('.js-vue3[data-handler="vue3"]');
+    if (vue3Container && vue3Container.children.length === 0) {
+      // Vue3 hat noch nicht gerendert - wir müssen warten!
+      vue3DeferredCount++; // Batch-Counter erhöhen statt einzeln zu loggen
+
+      // Detailliertes per-Deal-Log nur unter DEBUG.performance.observer
+      if (DEBUG.performance.observer) {
+        console.log(`[${getDebugTimestamp()}] [MDM] ⏳ Vue3 container empty (deal ${vue3DeferredCount}):`, dealId);
+      }
+
+      // Timeout setzen für Re-Check nach 500ms
+      if (!vue3RecheckScheduled.has(dealId)) {
+        vue3RecheckScheduled.add(dealId);
+        const timeoutId = setTimeout(() => {
+          vue3RecheckScheduled.delete(dealId);
+          vue3RecheckTimeouts.delete(dealId);
+          // Re-processing-Log nur unter DEBUG.performance.observer
+          if (DEBUG.performance.observer) {
+            console.log(`[${getDebugTimestamp()}] [MDM] 🔄 Re-processing after Vue3 render:`, dealId);
+          }
+          processArticles();
+        }, 500);
+        vue3RecheckTimeouts.set(dealId, timeoutId);
+      }
+
+      // Deal NICHT verarbeiten - beim nächsten Durchlauf (wenn Vue fertig) neu prüfen
+      dealsToShow.push({ deal, reason: "vue3-not-rendered-yet" });
+      return;
+    }
+
+    // Vue3 ist fertig - Timeout abbrechen falls vorhanden
+    if (vue3RecheckScheduled.has(dealId)) {
+      const timeoutId = vue3RecheckTimeouts.get(dealId);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        // Timeout-Cancel-Log nur unter DEBUG.performance.observer
+        if (DEBUG.performance.observer) {
+          console.log(`[${getDebugTimestamp()}] [MDM] ⏹️ Vue3 ready, cancelled timeout:`, dealId);
+        }
+      }
+      vue3RecheckScheduled.delete(dealId);
+      vue3RecheckTimeouts.delete(dealId);
+    }
+
+    // WICHTIG: Händlernamen-Feature MUSS VOR Wortfilter laufen!
     // Grund: Der Wortfilter soll die GEÄNDERTEN Titel sehen, nicht die Originale
+    let titleWasChanged = false;
+
     if (window.hideMatchingMerchantNames && !ORIGINAL_TITLES.has(dealId)) {
-      // Suche merchantLink im GESAMTEN Deal (nicht nur threadListCard-body)
+      // WICHTIG: Speichere Originaltitel auch für Deals OHNE Merchant-Info
+      // Dies ist essentiell, damit der Wortfilter konsistent auf Originaltitel arbeiten kann
+      const titleLink = deal.querySelector(".thread-title a");
+      if (titleLink && !ORIGINAL_TITLES.has(dealId)) {
+        ORIGINAL_TITLES.set(dealId, titleLink.textContent);
+      }
+
+      // Priorität 1: Suche merchantLink mit ID im GESAMTEN Deal
       const merchantLink = deal.querySelector('a[data-t="merchantLink"]');
 
-      // Debug: Alle Links analysieren
-      if (DEBUG.wordFilter || DEBUG.hideMatchingMerchantNames) {
+      // Priorität 2: Fallback für Händler ohne ID - Suche im "Verfügbar bei" Span
+      let fallbackMerchantSpan = null;
+      if (!merchantLink) {
+        // Suche nach "Verfügbar bei <span>händlername</span>" Struktur
+        const merchantInfoSpans = deal.querySelectorAll('.color--text-TranslucentSecondary.size--all-xs span');
+        for (const span of merchantInfoSpans) {
+          const text = span.textContent?.trim();
+          // Prüfe ob es ein Händlername sein könnte (z.B. "deblock.com")
+          if (text && (text.includes('.') || text.length > 3)) {
+            fallbackMerchantSpan = span;
+            break;
+          }
+        }
+      }
+
+      // Debug: Alle Links und Merchant-Infos analysieren
+      if (DEBUG.hideMatchingMerchantNames && (merchantLink || fallbackMerchantSpan)) {
         const titleLink = deal.querySelector(".thread-title a");
         const allLinksInDeal = deal.querySelectorAll('a');
         const allDataTLinks = deal.querySelectorAll('a[data-t]');
         const merchantLinks = deal.querySelectorAll('a[data-t="merchantLink"]');
 
-        console.log("[MDM MerchantNames] Deal analysis:", {
+        console.log(`[${getDebugTimestamp()}] [MDM MerchantNames] Deal analysis:`, {
           dealId,
           hasLink: !!merchantLink,
           merchantName: merchantLink?.textContent?.trim() || "none",
+          hasFallbackSpan: !!fallbackMerchantSpan,
+          fallbackMerchantName: fallbackMerchantSpan?.textContent?.trim() || "none",
           title: titleLink?.textContent,
           allLinksInDeal: allLinksInDeal.length,
           allDataTLinks: allDataTLinks.length,
@@ -6009,34 +6870,53 @@ function processArticles() {
         });
       }
 
-      if (merchantLink) {
+      // Verarbeite Titel wenn Händlerinfo verfügbar ist
+      if (merchantLink || fallbackMerchantSpan) {
         const titleElement = deal.querySelector(".thread-title");
         if (titleElement) {
-          const merchantName = merchantLink.textContent.trim();
+          const merchantName = merchantLink
+            ? merchantLink.textContent.trim()
+            : fallbackMerchantSpan.textContent.trim();
 
           const titleLink = titleElement.querySelector("a");
           if (titleLink) {
-            ORIGINAL_TITLES.set(dealId, titleLink.textContent);
-
-            const originalTitle = titleLink.textContent;
+            // Originaltitel wurde bereits oben gespeichert, hole ihn von dort
+            const originalTitle = ORIGINAL_TITLES.get(dealId) || titleLink.textContent;
             const newTitle = removeMerchantNameFromTitle(originalTitle, merchantName);
 
             if (originalTitle !== newTitle) {
               titleLink.textContent = newTitle;
               titleLink.setAttribute("title", newTitle);
+              titleWasChanged = true; // Flag setzen: Titel wurde geändert!
 
-              if (DEBUG.hideMatchingMerchantNames || DEBUG.wordFilter) {
-                console.log("[MDM MerchantNames] Title updated:", {
+              // Timing: Erster Title-Update in diesem Batch
+              if (firstTitleUpdateTime === null) {
+                firstTitleUpdateTime = performance.now();
+              }
+
+              if (DEBUG.hideMatchingMerchantNames) {
+                console.log(`[${getDebugTimestamp()}] [MDM MerchantNames] Title updated:`, {
                   dealId,
                   before: originalTitle,
-                  after: newTitle
+                  after: newTitle,
+                  titleWasChanged: true
                 });
               }
 
               perfTracker.update("domUpdates.titleChanges", 1);
               perfTracker.currentBatch.domUpdates.titleChanges++;
+
+              // WICHTIG: Cache-Key für diesen Deal invalidieren, damit Wortfilter neu evaluiert wird
+              // Der Wortfilter wird dann in der Haupt-Loop (deals.forEach) mit dem Originaltitel arbeiten
+              const cacheKey = `${dealId}_${excludeWordsHash}_${maxPrice}_${window.hideMatchingMerchantNames ? 1 : 0}`;
+              if (processedDealsCache.has(cacheKey)) {
+                processedDealsCache.delete(cacheKey);
+                if (DEBUG.hideMatchingMerchantNames) {
+                  console.log(`[${getDebugTimestamp()}] [MDM MerchantNames] Cache invalidiert für:`, dealId);
+                }
+              }
             } else if (DEBUG.hideMatchingMerchantNames) {
-              console.log("[MDM MerchantNames] No title change needed:", {
+              console.log(`[${getDebugTimestamp()}] [MDM MerchantNames] No title change needed:`, {
                 dealId,
                 title: originalTitle
               });
@@ -6047,20 +6927,12 @@ function processArticles() {
         }
       }
     } else if (window.hideMatchingMerchantNames && ORIGINAL_TITLES.has(dealId)) {
-      // Feature ist AN, aber Deal wurde bereits verarbeitet
-      if (DEBUG.wordFilter || DEBUG.hideMatchingMerchantNames) {
-        const titleLink = deal.querySelector(".thread-title a");
-        console.log("[MDM MerchantNames] SKIPPED (already in ORIGINAL_TITLES):", {
-          dealId,
-          originalTitleStored: ORIGINAL_TITLES.get(dealId),
-          currentTitle: titleLink?.textContent,
-          note: "Title change was skipped because dealId exists in ORIGINAL_TITLES"
-        });
-      }
+      // Feature ist AN, aber Deal wurde bereits verarbeitet - SKIP (kein Log nötig)
+      // Der Titel wurde bereits beim ersten Durchlauf geändert
     } else if (!window.hideMatchingMerchantNames && ORIGINAL_TITLES.has(dealId)) {
       // Feature deaktiviert: Originaltitel wiederherstellen
       if (DEBUG.hideMatchingMerchantNames) {
-        console.log("[MDM MerchantNames] Feature is DISABLED, restoring original title for:", dealId);
+        console.log(`[${getDebugTimestamp()}] [MDM MerchantNames] Feature is DISABLED, restoring original title for:`, dealId);
       }
       const titleLink = deal.querySelector(".thread-title a");
       if (titleLink) {
@@ -6068,22 +6940,92 @@ function processArticles() {
         titleLink.textContent = originalTitle;
         titleLink.setAttribute("title", originalTitle);
         if (DEBUG.hideMatchingMerchantNames) {
-          console.log("[MDM MerchantNames] Restored original title:", originalTitle);
+          console.log(`[${getDebugTimestamp()}] [MDM MerchantNames] Restored original title:`, originalTitle);
         }
       }
     }
 
-    // Cache-Prüfung: Nur neu evaluieren wenn sich Filter geändert haben
+    // PREIS-FILTER: Immer ZUERST prüfen, unabhängig vom Cache!
+    // Preise ändern sich nicht und sollten immer sofort gefiltert werden
+    let priceCheckPassed = false; // Flag: Wurde Preis-Check durchgeführt?
+
+    if (maxPrice > 0) {
+      // Vue3 ist an dieser Stelle bereits fertig gerendert (Check wurde oben durchgeführt)
+      const priceElement = deal.querySelector(".thread-price");
+
+      if (!priceElement) {
+        if (DEBUG.priceFilter) {
+          console.warn(`[${getDebugTimestamp()}] [MDM PriceFilter] ⚠️ .thread-price missing:`, {
+            dealId
+          });
+        }
+        // Kein Preis gefunden - aber TROTZDEM Wortfilter anwenden!
+        // NICHT sofort anzeigen - weitermachen mit Cache/shouldExcludeArticle
+        priceCheckPassed = true; // Preis-Check überspringen, aber Wortfilter anwenden
+      } else {
+        // Preis-Element gefunden - jetzt auswerten
+        priceCheckPassed = true;
+        const priceText = priceElement.textContent.trim();
+
+        if (DEBUG.priceFilter) {
+          console.log(`[${getDebugTimestamp()}] [MDM PriceFilter] 💰 Checking price:`, {
+            dealId,
+            priceText,
+            maxPrice
+          });
+        }
+
+        // Preis extrahieren
+        if (!priceText.includes("%") && !priceText.startsWith("-") && priceText.includes("€")) {
+          const euroFormatMatch = priceText.match(/([\d.,]+)\s*€/);
+          if (euroFormatMatch) {
+            let extractedPrice = euroFormatMatch[1];
+            extractedPrice = extractedPrice.replace(/\./g, "");
+            extractedPrice = extractedPrice.replace(",", ".");
+            const priceValue = parseFloat(extractedPrice);
+
+            if (!isNaN(priceValue) && priceValue > maxPrice) {
+              if (DEBUG.priceFilter) {
+                console.log(`[${getDebugTimestamp()}] [MDM PriceFilter] 🚫 HIDING - price exceeds:`, {
+                  dealId,
+                  price: priceValue,
+                  maxPrice,
+                  diff: priceValue - maxPrice
+                });
+              }
+              dealsToHide.push({ deal, reason: "price-exceeded" });
+              return;
+            }
+          }
+        }
+      }
+    }
+
+    // Cache-Prüfung
     // WICHTIG: hideMatchingMerchantNames muss im Cache-Key sein, da es Titel ändert!
-    const cacheKey = `${dealId}_${excludeWords.length}_${maxPrice}_${window.hideMatchingMerchantNames ? 1 : 0}`;
+    // excludeWordsHash stellt sicher dass Cache invalidiert wird wenn Filter geändert werden (nicht nur Anzahl)
+    const cacheKey = `${dealId}_${excludeWordsHash}_${maxPrice}_${window.hideMatchingMerchantNames ? 1 : 0}`;
     const cachedResult = processedDealsCache.get(cacheKey);
 
+    if (DEBUG.priceFilter) {
+      console.log("[MDM PriceFilter] 🔑 Cache check for deal:", {
+        dealId,
+        cacheKey,
+        isInCache: cachedResult !== undefined,
+        maxPrice,
+        excludeWordsCount: excludeWords.length,
+        excludeWordsHash
+      });
+    }
+
     if (cachedResult !== undefined) {
+      // Cache HIT - verwende gecachtes Ergebnis
       perfTracker.update("caching.hits", 1);
       perfTracker.currentBatch.caching.hits++;
       perfTracker.currentBatch.caching.dealIds.hits.push(dealId);
 
-      if (DEBUG.wordFilter) {
+      if (DEBUG.performance.caching && (cachedResult || titleWasChanged)) {
+        // Nur loggen wenn Deal ausgeblendet wird ODER Titel geändert wurde
         const titleLink = deal.querySelector(".thread-title a");
         console.log(`[${getDebugTimestamp()}] [MDM Cache] Cache HIT:`, {
           url: window.location.href,
@@ -6091,46 +7033,53 @@ function processArticles() {
           cacheKey,
           result: cachedResult ? "EXCLUDED" : "SHOWN",
           currentTitle: titleLink?.textContent,
-          currentTitleAttribute: titleLink?.getAttribute("title"),
-          note: "shouldExcludeArticle was NOT called (using cached result)"
+          titleWasChanged
         });
       }
 
       if (cachedResult) {
         dealsToHide.push({ deal, reason: "cached-word-filter" });
-        // Händlernamen-Feature läuft NICHT für ausgeblendete Deals
         return;
       } else {
         dealsToShow.push({ deal, reason: "cached-no-match" });
-        // WICHTIG: Nach dem Cache-Hit NICHT returnen - Händlernamen-Feature muss noch laufen!
       }
     } else {
+      // Cache MISS - neu evaluieren
       perfTracker.update("caching.misses", 1);
       perfTracker.currentBatch.caching.misses++;
       perfTracker.currentBatch.caching.dealIds.misses.push(dealId);
 
-      if (DEBUG.wordFilter) {
-        console.log(`[${getDebugTimestamp()}] [MDM Cache] Cache MISS - calling shouldExcludeArticle:`, {
-          url: window.location.href,
-          dealId,
-          cacheKey
-        });
+      if (DEBUG.priceFilter) {
+        console.log("[MDM PriceFilter] 🎯 Cache MISS - calling shouldExcludeArticle for deal:", dealId);
       }
 
       // Nur bei neuem Deal oder geänderten Filtern evaluieren
-      const shouldExclude = shouldExcludeArticle(deal);
+      // WICHTIG: Erstelle normalisierten Titel für konsistente Filter-Anwendung
+      // KRITISCH: Wenn hideMatchingMerchantNames aktiv ist, nutze ORIGINAL_TITLES!
+      const titleLink = deal.querySelector(".thread-title a");
+      let titleForFilter;
 
-      if (DEBUG.wordFilter) {
-        const titleLink = deal.querySelector(".thread-title a");
-        console.log(`[${getDebugTimestamp()}] [MDM Cache] Adding to cache:`, {
-          url: window.location.href,
+      if (window.hideMatchingMerchantNames && ORIGINAL_TITLES.has(dealId)) {
+        // Nutze Originaltitel, damit Händlernamen im Wortfilter erkannt werden
+        titleForFilter = ORIGINAL_TITLES.get(dealId);
+      } else {
+        // Nutze sichtbaren Titel
+        titleForFilter = titleLink?.textContent || "";
+      }
+
+      const normalizedTitleForFilter = normalizeForSearch(titleForFilter);
+
+      const shouldExclude = shouldExcludeArticle(deal, normalizedTitleForFilter);
+
+      if (DEBUG.performance.caching && shouldExclude) {
+        // Nur loggen wenn Deal ausgeblendet wird
+        console.log(`[${getDebugTimestamp()}] [MDM Cache] MISS → EXCLUDED:`, {
           dealId,
-          cacheKey,
-          shouldExclude,
-          result: shouldExclude ? "EXCLUDED" : "SHOWN",
-          currentTitle: titleLink?.textContent,
-          currentTitleAttribute: titleLink?.getAttribute("title"),
-          hideMatchingMerchantNamesActive: window.hideMatchingMerchantNames
+          titleForFilter,
+          usedOriginalTitle: window.hideMatchingMerchantNames && ORIGINAL_TITLES.has(dealId),
+          visibleTitle: titleLink?.textContent,
+          normalizedTitle: normalizedTitleForFilter,
+          cacheKey
         });
       }
 
@@ -6161,10 +7110,8 @@ function processArticles() {
     }
   });
 
-  // Nur auf der Suchseite Sucheinstellungen verarbeiten
-  if (window.location.pathname === "/search") {
-    processSucheinstellungen();
-  }
+  // processSucheinstellungen() wird nur EINMAL in init() aufgerufen,
+  // NICHT in jedem processArticles()-Durchlauf (verhindert Endlosschleife/Reloads)
 
   const duration = perfTracker.end("processArticles");
   perfTracker.update("processArticles.totalTime", duration);
@@ -6191,19 +7138,40 @@ function processArticles() {
     observeDealMutations(combinedObserver);
   }
 
+  // MerchantFilter Batch-Zusammenfassung
+  if (DEBUG.merchantFilter && merchantFilterCheckedCount > 0) {
+    console.log(`[${getDebugTimestamp()}] [MDM MerchantFilter] ✅ Batch done – checked ${merchantFilterCheckedCount} deals, hidden ${merchantFilterHiddenCount}`);
+  }
+
   // DELAYED RE-CHECK für Merchant-Filter
   // Problem: Bei Tab-Wechsel/Reload laden merchantIds asynchron NACH processArticles
   // Lösung: Nach 2 Sekunden erneut prüfen ob Deals mit merchantId jetzt versteckt werden müssen
-  if (excludeMerchantsCache.ids.size > 0 || excludeMerchantsCache.normalizedNames.size > 0) {
-    setTimeout(() => {
-      if (DEBUG.merchantFilter) {
-        console.log(`[${getDebugTimestamp()}] [MDM MerchantFilter] 🔄 Delayed Re-Check gestartet (2s nach processArticles)`);
-      }
+  // Optimierung: Nur planen wenn tatsächlich Deals ohne merchantId existieren
+  const currentDealCount = deals.length;
+  const timeSinceLastRecheck = Date.now() - lastSuccessfulMerchantRecheck;
 
+  if (
+    dealsWithoutMerchantId > 0 &&
+    (excludeMerchantsCache.ids.size > 0 || excludeMerchantsCache.normalizedNames.size > 0) &&
+    !delayedMerchantRecheckScheduled &&
+    // Intelligente Guards: Nur bei neuen Deals ODER nach Cooldown
+    (
+      currentDealCount > lastKnownDealCount || // Neue Deals im DOM
+      timeSinceLastRecheck > 10000 // 10s Cooldown
+    )
+  ) {
+    lastKnownDealCount = currentDealCount;
+    delayedMerchantRecheckScheduled = true;
+
+    setTimeout(() => {
       // Prüfe alle sichtbaren Deals nochmal
       const visibleDeals = document.querySelectorAll(
         'article.thread--deal:not(.mydealz-manager-hidden), article.thread--voucher:not(.mydealz-manager-hidden)'
       );
+
+      if (DEBUG.merchantFilter) {
+        console.log(`[${getDebugTimestamp()}] [MDM MerchantFilter] 🔎 Delayed Re-Check start – checking ${visibleDeals.length} deals`);
+      }
 
       let recheckHiddenCount = 0;
       visibleDeals.forEach((deal) => {
@@ -6214,11 +7182,12 @@ function processArticles() {
         // Prüfe ob dieser Deal jetzt eine merchantId hat und gefiltert werden soll
         if (merchantId && excludeMerchantsCache.ids.has(String(merchantId))) {
           if (DEBUG.merchantFilter) {
-            console.log(`[${getDebugTimestamp()}] [MDM MerchantFilter] 🔄 Re-Check MATCH by ID:`, {
+            console.log(`[${getDebugTimestamp()}] [MDM MerchantFilter] ⛔ Hiding deal due to merchant match (delayed):`, {
               dealId,
               merchantId,
               merchantName,
-              reason: "delayed-recheck"
+              matchType: "id",
+              matchValue: merchantId
             });
           }
           hideDeal(deal, `delayed-merchant-id:${merchantId}`);
@@ -6227,11 +7196,12 @@ function processArticles() {
           const normalizedMerchantName = normalizeForSearch(merchantName);
           if (excludeMerchantsCache.normalizedNames.has(normalizedMerchantName)) {
             if (DEBUG.merchantFilter) {
-              console.log(`[${getDebugTimestamp()}] [MDM MerchantFilter] 🔄 Re-Check MATCH by Name:`, {
+              console.log(`[${getDebugTimestamp()}] [MDM MerchantFilter] ⛔ Hiding deal due to merchant match (delayed):`, {
                 dealId,
+                merchantId,
                 merchantName,
-                normalizedMerchantName,
-                reason: "delayed-recheck"
+                matchType: "name",
+                matchValue: normalizedMerchantName
               });
             }
             hideDeal(deal, `delayed-merchant-name:${merchantName}`);
@@ -6240,29 +7210,63 @@ function processArticles() {
         }
       });
 
-      if (DEBUG.merchantFilter) {
-        console.log(`[${getDebugTimestamp()}] [MDM MerchantFilter] 🔄 Delayed Re-Check abgeschlossen:`, {
-          visibleDealsChecked: visibleDeals.length,
-          additionallyHidden: recheckHiddenCount
-        });
+      // Logging: Nur bei tatsächlichem Erfolg (additionallyHidden > 0)
+      if (DEBUG.merchantFilter && recheckHiddenCount > 0) {
+        console.log(`[${getDebugTimestamp()}] [MDM MerchantFilter] ✅ Delayed Re-Check done – checked ${visibleDeals.length} deals, hidden ${recheckHiddenCount}`);
       }
+
+      // Flag zurücksetzen - ermöglicht neue Re-Checks für zukünftige Batches
+      lastSuccessfulMerchantRecheck = Date.now();
+      delayedMerchantRecheckScheduled = false;
     }, 2000); // 2 Sekunden Delay
+  }
+
+  // === Batch-Ende Logging ===
+
+  // Aggregiertes Vue3-Defer-Logging (ersetzt viele Einzel-Logs)
+  if (DEBUG.performance.lazyRenderSummary && vue3DeferredCount > 0) {
+    console.log(
+      `[${getDebugTimestamp()}] [MDM] Deals mit verzögerter Anzeige: ${vue3DeferredCount} Deal(s) werden später erneut geprüft.`
+    );
+  }
+
+  // Performance-Messung: Zeit bis zum ersten Title-Update
+  if (DEBUG.performance.processing && deals.length > 0) {
+    const timeToFirstUpdate = firstTitleUpdateTime !== null
+      ? (firstTitleUpdateTime - batchStartTime).toFixed(2)
+      : 'N/A';
+
+    console.log(`[${getDebugTimestamp()}] [MDM Performance] Batch completed:`, {
+      totalDeals: deals.length,
+      vue3Deferred: vue3DeferredCount,
+      timeToFirstTitleUpdate_ms: timeToFirstUpdate
+    });
   }
 }
 
 // ===== Filterlogik =====
 // Ausschlussprüfung für Artikel
-function shouldExcludeArticle(article) {
+function shouldExcludeArticle(article, normalizedTitleForFilter = null) {
   const titleElement = article.querySelector(".thread-title");
   if (!titleElement) {
     return { shouldExclude: false, reason: "no-title-element" };
+  }
+
+  if (DEBUG.priceFilter) {
+    console.log("[MDM PriceFilter] 🔍 Checking article:", {
+      articleId: article.id,
+      maxPrice: maxPrice,
+      maxPriceType: typeof maxPrice,
+      willCheckPrice: maxPrice > 0,
+      reason: maxPrice > 0 ? "Preis-Check wird durchgeführt" : "⚠️ maxPrice ist 0 - KEIN Preis-Check!"
+    });
   }
 
   if (maxPrice > 0) {
     perfTracker.start("priceFilter");
     perfTracker.update("filtering.priceFilter.calls", 1);
 
-    const priceSelectors = [".thread-price", ".text--color-greyShade"];
+    const priceSelectors = [".thread-price", ".text--color-greyShade", ".color--text-NeutralSecondary"];
     let foundPrice = false;
     let checkedSelectors = [];
 
@@ -6270,6 +7274,9 @@ function shouldExcludeArticle(article) {
       const priceElement = article.querySelector(selector);
       if (!priceElement) {
         checkedSelectors.push({ selector, found: false });
+        if (DEBUG.priceFilterVerbose) {
+          console.log(`[MDM PriceFilter] ❌ Selector '${selector}' not found in article ${article.id}`);
+        }
         continue;
       }
 
@@ -6278,33 +7285,66 @@ function shouldExcludeArticle(article) {
 
       const priceText = priceElement.textContent.trim();
 
-      if (DEBUG.priceFilter) {
-        console.log("[MDM PriceFilter] Found price element:", {
+      if (DEBUG.priceFilterVerbose) {
+        console.log("[MDM PriceFilter] ✅ Found price element:", {
+          articleId: article.id,
           selector,
           text: priceText,
         });
       }
 
-      if (priceText.includes("%")) continue;
-      if (priceText.startsWith("-")) continue;
-      if (!priceText.includes("€")) continue;
+      if (priceText.includes("%")) {
+        if (DEBUG.priceFilterVerbose) console.log("[MDM PriceFilter] ⏭️ Skipped: contains %");
+        continue;
+      }
+      if (priceText.startsWith("-")) {
+        if (DEBUG.priceFilterVerbose) console.log("[MDM PriceFilter] ⏭️ Skipped: starts with -");
+        continue;
+      }
+      if (!priceText.includes("€")) {
+        if (DEBUG.priceFilterVerbose) console.log("[MDM PriceFilter] ⏭️ Skipped: no € symbol");
+        continue;
+      }
 
       const euroFormatMatch = priceText.match(/([\d.,]+)\s*€/);
       if (euroFormatMatch) {
         let extractedPrice = euroFormatMatch[1];
+
+        if (DEBUG.priceFilterVerbose) {
+          console.log("[MDM PriceFilter] 📊 Extracting price:", {
+            articleId: article.id,
+            rawMatch: euroFormatMatch[1],
+            step1_removeDots: extractedPrice.replace(/\./g, ""),
+            step2_replaceComma: extractedPrice.replace(/\./g, "").replace(",", ".")
+          });
+        }
+
         extractedPrice = extractedPrice.replace(/\./g, "");
         extractedPrice = extractedPrice.replace(",", ".");
 
         const priceValue = parseFloat(extractedPrice);
+
+        if (DEBUG.priceFilterVerbose) {
+          console.log("[MDM PriceFilter] 💰 Price comparison:", {
+            articleId: article.id,
+            extractedString: extractedPrice,
+            parsedValue: priceValue,
+            maxPrice: maxPrice,
+            exceeds: priceValue > maxPrice,
+            isValid: !isNaN(priceValue)
+          });
+        }
 
         if (!isNaN(priceValue) && priceValue > maxPrice) {
           perfTracker.update("filtering.priceFilter.hits", 1);
           perfTracker.currentBatch.filtering.priceExceeded++;
 
           if (DEBUG.priceFilter) {
-            console.log("[MDM PriceFilter] Price exceeds max:", {
+            console.log("[MDM PriceFilter] 🚫 HIDING: Price exceeds max:", {
+              articleId: article.id,
               price: priceValue,
-              maxPrice,
+              maxPrice: maxPrice,
+              difference: priceValue - maxPrice
             });
           }
 
@@ -6312,16 +7352,32 @@ function shouldExcludeArticle(article) {
           perfTracker.update("filtering.priceFilter.totalTime", duration);
 
           return true;
+        } else if (DEBUG.priceFilterVerbose) {
+          console.log("[MDM PriceFilter] ✅ KEEPING: Price is OK:", {
+            articleId: article.id,
+            price: priceValue,
+            maxPrice: maxPrice
+          });
         }
+      } else if (DEBUG.priceFilterVerbose) {
+        console.log("[MDM PriceFilter] ⚠️ No price match in text:", priceText);
       }
     }
 
-    if (!foundPrice && DEBUG.criticalErrors) {
-      console.warn(
-        "[MDM Critical] ⚠ priceFilter: ALLE Preis-Selektoren fehlgeschlagen!"
-      );
-      console.warn("[MDM Critical] Checked selectors:", checkedSelectors);
-      console.warn("[MDM Critical] Article ID:", article.id);
+    if (!foundPrice) {
+      if (DEBUG.priceFilter) {
+        console.warn(
+          "[MDM PriceFilter] ⚠️ NO PRICE FOUND for article:", article.id
+        );
+        console.warn("[MDM PriceFilter] Checked selectors:", checkedSelectors);
+      }
+      if (DEBUG.criticalErrors) {
+        console.warn(
+          "[MDM Critical] ⚠ priceFilter: ALLE Preis-Selektoren fehlgeschlagen!"
+        );
+        console.warn("[MDM Critical] Checked selectors:", checkedSelectors);
+        console.warn("[MDM Critical] Article ID:", article.id);
+      }
     }
 
     const duration = perfTracker.end("priceFilter");
@@ -6329,14 +7385,33 @@ function shouldExcludeArticle(article) {
   }
 
   const titleLink = titleElement.querySelector("a");
-  const rawTitle = titleLink?.getAttribute("title") || titleElement.innerText;
-  const normalizedTitle = normalizeForSearch(rawTitle);
+
+  // KRITISCH: Wenn hideMatchingMerchantNames aktiv ist, muss der Wortfilter auf den ORIGINALTITEL
+  // angewendet werden, nicht auf den bereits bereinigten Titel!
+  // Ansonsten werden Deals mit bereits entferntem Händlernamen nicht gefiltert.
+  const dealId = article.id || article.getAttribute("data-thread-id");
+  let rawTitle;
+
+  if (window.hideMatchingMerchantNames && dealId && ORIGINAL_TITLES.has(dealId)) {
+    // Nutze Originaltitel für Wortfilter, damit Händlernamen erkannt werden
+    rawTitle = ORIGINAL_TITLES.get(dealId);
+  } else {
+    // Nutze sichtbaren Titel
+    rawTitle = titleLink?.getAttribute("title") || titleElement.innerText;
+  }
+
+  // WICHTIG: Nutze übergebenen normalizedTitleForFilter wenn vorhanden, sonst neu erstellen
+  // Dies stellt sicher, dass der Wortfilter den GLEICHEN Titel sieht wie die Cache-Logik
+  const normalizedTitle = normalizedTitleForFilter || normalizeForSearch(rawTitle);
 
   if (DEBUG.wordFilter) {
     console.log("[MDM WordFilter] shouldExcludeArticle START:", {
       articleId: article.id,
+      dealId,
       rawTitle,
       normalizedTitle,
+      usedOriginalTitle: window.hideMatchingMerchantNames && dealId && ORIGINAL_TITLES.has(dealId),
+      normalizedTitleForFilterProvided: !!normalizedTitleForFilter,
       titleAttribute: titleLink?.getAttribute("title"),
       textContent: titleLink?.textContent,
       innerText: titleElement.innerText,
@@ -6376,40 +7451,33 @@ function shouldExcludeArticle(article) {
     perfTracker.start("wordFilter");
     perfTracker.update("filtering.wordFilter.calls", 1);
 
-    if (DEBUG.wordFilter) {
+    if (DEBUG.wordFilterVerbose) {
       console.log("[MDM WordFilter] Testing filters:", {
         totalFilters: excludeWordCache.length,
-        filters: excludeWordCache.map(e => `"${e.original}" (${e.type})`).join(", ")
+        sampleFilters: excludeWordCache.slice(0, 5).map(e => `"${e.original}" (${e.type})`).join(", ") + "..."
       });
     }
 
     let matched = false;
-    let testCount = 0;
+    let matchedFilter = null;
     for (const entry of excludeWordCache) {
-      testCount++;
-      if (DEBUG.wordFilter) {
-        console.log(`[MDM WordFilter] [${testCount}/${excludeWordCache.length}] Testing: "${entry.original}" (${entry.type})`);
-      }
-
       if (entry.matcher(normalizedTitle)) {
         matched = true;
+        matchedFilter = entry;
         perfTracker.update("filtering.wordFilter.hits", 1);
         perfTracker.currentBatch.filtering.wordMatches++;
 
+        // DEBUG: Match gefunden
         if (DEBUG.wordFilter) {
-          console.log("[MDM WordFilter] ✂️ MATCH FOUND - Deal will be HIDDEN:", {
-            articleId: article.id,
-            title: normalizedTitle,
-            matchedFilter: entry.original,
-            filterType: entry.type,
+          console.log("[MDM WordFilter] ✂️ MATCH - Deal HIDDEN:", {
+            dealId: article.id,
+            title: rawTitle,
+            filter: entry.original,
+            type: entry.type
           });
         }
         break;
       }
-    }
-
-    if (DEBUG.wordFilter && !matched) {
-      console.log("[MDM WordFilter] ✓ No match - Deal will be SHOWN");
     }
 
     const duration = perfTracker.end("wordFilter");
@@ -6432,13 +7500,14 @@ function hideDeal(deal, reason = "unknown") {
   deal.classList.add("mydealz-manager-hidden");
   deal.style.setProperty("display", "none", "important");
   deal.setAttribute("data-hidden-by-mydealz-manager", "true");
+  deal.setAttribute("data-hide-reason", reason); // Grund speichern
 
-  if (DEBUG.merchantFilter && !wasAlreadyHidden) {
+  if (DEBUG.wordFilter && !wasAlreadyHidden) {
     // Überprüfe ob das Verstecken tatsächlich funktioniert hat
     const computedStyle = window.getComputedStyle(deal);
     const isActuallyHidden = computedStyle.display === "none";
 
-    console.log(`[${getDebugTimestamp()}] [MDM Hide] Deal versteckt:`, {
+    console.log(`[${getDebugTimestamp()}] [MDM Hide] ✂️ Deal wird VERSTECKT:`, {
       dealId,
       reason,
       wasAlreadyHidden,
@@ -6477,8 +7546,8 @@ function showDeal(deal, reason = "unknown") {
   deal.style.opacity = "";
   deal.setAttribute("data-hidden-by-mydealz-manager", "false");
 
-  if (DEBUG.merchantFilter && wasHidden) {
-    console.log(`[${getDebugTimestamp()}] [MDM Show] Deal angezeigt:`, {
+  if (DEBUG.wordFilter && wasHidden) {
+    console.log(`[${getDebugTimestamp()}] [MDM Show] 👁️ Deal wird ANGEZEIGT:`, {
       dealId,
       reason,
       wasHidden,
@@ -6600,23 +7669,30 @@ function processSucheinstellungen() {
 
 // Funktion zum Ausblenden von User-Deals
 function handleUserBlock(article) {
+  console.log("[MDM UserBlock] ===== handleUserBlock CALLED =====");
+  console.log("[MDM UserBlock] article:", article);
+  console.log("[MDM UserBlock] article.id:", article?.id);
+  console.log("[MDM UserBlock] DEBUG.userBlocking:", DEBUG.userBlocking);
+
   if (DEBUG.userBlocking) {
     console.log("[MDM UserBlock] handleUserBlock called", {
       article: article?.id,
     });
   }
 
-  let username = null;
+  let displayName = null;
   let foundVia = null;
 
-  // Methode 1: data-md-author Attribut (zuverlässigste Methode)
-  username = article.getAttribute("data-md-author");
-  if (username) {
+  // Methode 1: data-md-author Attribut (zuverlässigste Methode, Original-Case)
+  displayName = article.getAttribute("data-md-author");
+  console.log("[MDM UserBlock] Method 1 result:", { displayName, foundVia: displayName ? "data-md-author" : null });
+
+  if (displayName) {
     foundVia = "data-md-author";
     if (DEBUG.userBlocking) {
       console.log(
         "[MDM UserBlock] ✓ Username found via data-md-author:",
-        username
+        displayName
       );
     }
   } else if (DEBUG.criticalErrors) {
@@ -6626,19 +7702,19 @@ function handleUserBlock(article) {
   }
 
   // Methode 2: Span mit "Veröffentlicht von" Text
-  if (!username) {
+  if (!displayName) {
     const userSpan = article.querySelector(
       ".overflow--ellipsis.size--all-xs.size--fromW3-s"
     );
     if (userSpan) {
       const match = userSpan.textContent.match(/Veröffentlicht von\s+(\S+)/i);
       if (match && match[1]) {
-        username = match[1];
+        displayName = match[1];
         foundVia = "span-text";
         if (DEBUG.userBlocking) {
           console.log(
             "[MDM UserBlock] ✓ Username found via span text:",
-            username
+            displayName
           );
         }
       } else if (DEBUG.criticalErrors) {
@@ -6655,13 +7731,13 @@ function handleUserBlock(article) {
   }
 
   // Methode 3: User-Link im Header
-  if (!username) {
+  if (!displayName) {
     const userLink = article.querySelector('a[data-t="userLink"]');
     if (userLink) {
-      username = userLink.textContent.trim();
+      displayName = userLink.textContent.trim();
       foundVia = "userLink";
       if (DEBUG.userBlocking) {
-        console.log("[MDM UserBlock] ✓ Username found via userLink:", username);
+        console.log("[MDM UserBlock] ✓ Username found via userLink:", displayName);
       }
     } else if (DEBUG.criticalErrors) {
       console.warn(
@@ -6670,7 +7746,7 @@ function handleUserBlock(article) {
     }
   }
 
-  if (!username) {
+  if (!displayName) {
     console.error(
       "[MDM Critical] ❌ ALLE Selektoren fehlgeschlagen! Kann Username nicht finden."
     );
@@ -6690,54 +7766,84 @@ function handleUserBlock(article) {
     return;
   }
 
-  // Username normalisieren (Kleinbuchstaben für Vergleich)
-  username = username.toLowerCase();
-  if (DEBUG.userBlocking) {
-    console.log("[MDM UserBlock] Normalized username:", username);
-  }
+  // Normalisiere für Vergleich/Speicher-Key
+  const normalizedUsername = displayName.toLowerCase();
 
-  // Bestätigungsdialog
-  if (
-    !confirm(`Möchtest du wirklich alle Deals von "${username}" ausblenden?`)
-  ) {
-    if (DEBUG.userBlocking) {
-      console.log("[MDM UserBlock] User cancelled blocking");
-    }
+  console.log('[MDM UserBlock] Username normalized:', {
+    displayName,
+    normalizedUsername
+  });
+
+  // Bestätigungsdialog mit Original-Case
+  console.log('[MDM UserBlock] Showing confirm dialog for:', displayName);
+  const userConfirmed = confirm(`Möchtest du wirklich alle Deals von "${displayName}" ausblenden?`);
+  console.log('[MDM UserBlock] User confirmed:', userConfirmed);
+
+  if (!userConfirmed) {
+    console.log("[MDM UserBlock] User cancelled blocking");
     return;
   }
 
-  // Lade blockierte Benutzer
-  const blockedUsers = GM_getValue("blockedUsers", []);
-  if (DEBUG.userBlocking) {
-    console.log("[MDM UserBlock] Current blocked users:", blockedUsers);
-  }
+  // Lade blockierte Benutzer (Object-Format)
+  const blockedUsers = GM_getValue("blockedUsers", {});
+  console.log("[MDM UserBlock] Current blocked users:", blockedUsers);
 
-  if (!blockedUsers.includes(username)) {
-    blockedUsers.unshift(username);
-    GM_setValue("blockedUsers", blockedUsers);
-    userAddedAt[username] = { timestamp: formatTimestamp(), isLegacy: false };
-    GM_setValue("userAddedAt", userAddedAt);
+  // Prüfe ob User bereits blockiert (case-insensitive)
+  if (!blockedUsers[normalizedUsername]) {
+    console.log("[MDM UserBlock] User NOT in blocklist, adding now:", normalizedUsername);
+
+    // Speichere mit displayName + normalizedUsername
+    blockedUsers[normalizedUsername] = {
+      displayName: displayName,
+      normalizedUsername: normalizedUsername,
+      timestamp: Date.now()
+    };
+
     if (DEBUG.userBlocking) {
-      console.log("[MDM UserBlock] User added to blocklist:", username);
-      console.log("[MDM UserBlock] Updated blocklist:", blockedUsers);
+      console.log("[MDM UserBlock] Saving blockedUsers:", blockedUsers);
+    }
+
+    // Sofort speichern
+    GM_setValue("blockedUsers", blockedUsers);
+
+    if (DEBUG.userBlocking) {
+      console.log("[MDM UserBlock] blockedUsers saved to GM storage");
+    }
+
+    // Timestamp für UI
+    userAddedAt[normalizedUsername] = { timestamp: formatTimestamp(), isLegacy: false };
+    GM_setValue("userAddedAt", userAddedAt);
+
+    if (DEBUG.userBlocking) {
+      console.log("[MDM UserBlock] User added to blocklist successfully:", normalizedUsername);
     }
   } else {
     if (DEBUG.userBlocking) {
-      console.log("[MDM UserBlock] User already in blocklist:", username);
+      console.log("[MDM UserBlock] User ALREADY in blocklist:", normalizedUsername);
     }
   }
 
-  // Aktualisiere die Anzeige
-  processArticles();
+  // Sofort Filter anwenden (forceRun=true um Early Exit zu überspringen)
   if (DEBUG.userBlocking) {
-    console.log("[MDM UserBlock] processArticles called to refresh display");
+    console.log('[MDM UserBlock] Calling processArticles(), blocked users:', Object.keys(blockedUsers));
   }
+  processArticles(true);
 }
 
 //#endregion
 
 //#region --- 6. Initialisierung und Setup ---
 function init() {
+  // Verhindert mehrfache Ausführung - init() soll nur einmal pro Seitenladung laufen
+  if (initHasRun) {
+    return;
+  }
+  initHasRun = true;
+
+  if (DEBUG.initialization) {
+    console.log("[MDM] 🚀 init() called");
+  }
+
   // ===== 1. Grundeinstellungen und gespeicherte Daten laden =====
   // loadSettings() lädt ALLE Daten: excludeWords, whitelistWords, merchants, maxPrice, hideColdDeals, hiddenDeals, etc.
   loadSettings();
@@ -6750,9 +7856,6 @@ function init() {
 
   // ===== 2. Feature-Flags und UI-Status =====
 
-  // --- Share Buttons ---
-  updateShareButtonsVisibility(hideShareButtons);
-
   // --- Händlernamen ---
   window.hideMatchingMerchantNames = hideMatchingMerchantNames;
 
@@ -6764,6 +7867,13 @@ function init() {
 
   // --- Scroll Handling (nur einmal global initialisieren) ---
   setupScrollHandling();
+
+  // WICHTIG: Initiales Filtern nach Skript-Start mit forceRun=true
+  // Dadurch wird der Early Exit umgangen und ALLE Deals werden garantiert gefiltert
+  // auch wenn Vue3 noch asynchron rendert oder Deals verzögert geladen werden
+  setTimeout(() => {
+    processArticles(true);
+  }, 500);
 }
 
 //#endregion
@@ -7043,6 +8153,7 @@ function removeMerchantNameFromTitle(title, merchant) {
 
   // Normalisiere Händlernamen und hole Konfiguration
   const merchantName = merchant.toLowerCase().replace("...", "");
+  const normalizedMerchantName = normalizeForSearch(merchant.replace("...", ""));
 
   // Wenn der Händlername CamelCase ist (z.B. FrankfurterRundschau, BerlinerMorgenpost)
   // erstelle eine Version mit Leerzeichen (z.B. "Frankfurter Rundschau", "Berliner Morgenpost")
@@ -7081,26 +8192,8 @@ function removeMerchantNameFromTitle(title, merchant) {
     baseShopName = merchantName.split(".")[0];
   }
 
-  // Handle special case for any merchant-related pattern in parentheses at beginning
-  if (title.match(/^\([^)]+\)/i)) {
-    const lowerTitle = title.toLowerCase();
-    const lowerMerchant = merchantName.toLowerCase();
-
-    // Check if merchant name is contained in the parentheses at the beginning
-    if (
-      lowerTitle.substring(0, lowerTitle.indexOf(")")).includes(lowerMerchant)
-    ) {
-      // Prüfe auf Slash-Format
-      if (title.match(/^\([^/]+\/[^)]+\)/i)) {
-        // Behandle Slash-Format separat
-        return title.replace(
-          new RegExp(`\\(${merchantName}\\s*/\\s*(.+?)\\)`, "i"),
-          "($1)"
-        );
-      }
-      return title.replace(/^\([^)]+\)\s*/, "");
-    }
-  }
+  // REMOVED: Old parentheses logic that returned early.
+  // Now handled by the global pattern system below which processes ALL occurrences.
 
   // Händler-spezifische Transformationen definieren
   const getMerchantConfig = (merchant) => {
@@ -7293,41 +8386,81 @@ function removeMerchantNameFromTitle(title, merchant) {
   // Erstelle Varianten des Händlernamens
   const merchantVariants = [
     merchantName,
+    normalizedMerchantName, // Normalisierte Version (ö→o, ü→u, ä→a)
     merchantName.replace(/\s+/g, "-"),
     merchantName.replace(/\-/g, " "),
+    normalizedMerchantName.replace(/\s+/g, "-"),
+    normalizedMerchantName.replace(/\-/g, " "),
     ...config.abbreviations,
     ...domainVariants,
   ];
 
   // Den Basisnamen auch zu den Varianten hinzufügen
   if (baseShopName !== merchantName) {
+    const normalizedBaseName = normalizeForSearch(baseShopName);
     merchantVariants.push(baseShopName);
+    merchantVariants.push(normalizedBaseName);
     merchantVariants.push(baseShopName.replace(/\s+/g, "-"));
     merchantVariants.push(baseShopName.replace(/\-/g, " "));
+    merchantVariants.push(normalizedBaseName.replace(/\s+/g, "-"));
+    merchantVariants.push(normalizedBaseName.replace(/\-/g, " "));
   }
 
   // Und, in umgekehrter Richtung, wenn der Händlername bereits eine Domain ist
   if (merchantName.includes(".") || merchantName.includes("-shop")) {
     // Entferne TLD und mögliche Zusätze wie "-shop"
-    const baseName = merchantName
+    let baseName = merchantName
       .split(".")[0] // Entferne TLD (.com, .de, etc.)
       .replace(/-shop$/, "") // Entferne mögliches "-shop" am Ende
       .replace(/[^\w\s-]/g, ""); // Entferne alle Sonderzeichen außer Bindestriche und Leerzeichen
 
+    // Extrahiere nur den Kernnamen (z.B. "deblock" aus "verfügbar bei deblock.com")
+    const words = baseName.split(/\s+/);
+    const coreName = words[words.length - 1]; // Letztes Wort (z.B. "deblock")
+
     merchantVariants.push(baseName);
+    merchantVariants.push(normalizeForSearch(baseName));
+    merchantVariants.push(coreName);
+    merchantVariants.push(normalizeForSearch(coreName));
     // Füge auch Varianten mit unterschiedlicher Groß-/Kleinschreibung hinzu
     merchantVariants.push(baseName.toLowerCase());
+    merchantVariants.push(coreName.toLowerCase());
     merchantVariants.push(baseName.toUpperCase());
+
+    // NEU: Erstelle Umlaut-Varianten (druckerzubehoer → druckerzubehör)
+    const denormalizeUmlauts = (str) => {
+      return str
+        .replace(/oe/g, 'ö').replace(/OE/g, 'Ö')
+        .replace(/ue/g, 'ü').replace(/UE/g, 'Ü')
+        .replace(/ae/g, 'ä').replace(/AE/g, 'Ä');
+    };
+
+    if (baseName.match(/oe|ue|ae/i)) {
+      merchantVariants.push(denormalizeUmlauts(baseName));
+      merchantVariants.push(denormalizeUmlauts(baseName).toLowerCase());
+    }
+    if (coreName.match(/oe|ue|ae/i)) {
+      merchantVariants.push(denormalizeUmlauts(coreName));
+      merchantVariants.push(denormalizeUmlauts(coreName).toLowerCase());
+    }
   }
 
   // Entferne Händlernamen
   merchantVariants.forEach((variant) => {
-    // Spezialfall für Domain-Formate wie "target.com"
-    if (variant.includes(".")) {
-      // Genereller Ansatz, um "target.com" zu entfernen
-      const baseDomain = variant.split(".")[0];
-      const escapedBase = baseDomain.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
-      const escapedVariant = variant.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+    // Für besseres Matching: Erstelle auch normalisierte Version der Variante
+    const normalizedVariant = normalizeForSearch(variant);
+    const variantsToCheck = [variant];
+    if (normalizedVariant !== variant.toLowerCase()) {
+      variantsToCheck.push(normalizedVariant);
+    }
+
+    variantsToCheck.forEach((currentVariant) => {
+      // Spezialfall für Domain-Formate wie "target.com"
+      if (currentVariant.includes(".")) {
+        // Genereller Ansatz, um "target.com" zu entfernen
+        const baseDomain = currentVariant.split(".")[0];
+        const escapedBase = baseDomain.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+        const escapedVariant = currentVariant.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
 
       // Entferne "[domain.com]" Format am Anfang
       result = result.replace(
@@ -7360,17 +8493,17 @@ function removeMerchantNameFromTitle(title, merchant) {
         new RegExp(`\\s+bei\\s+${escapedBase}\\.[a-z.]+(?:\\s+|$)`, "i"),
         " "
       );
-    }
+      }
 
-    // Für Namen mit Punkten, verwende spezifischere Ersetzungsmuster
-    const needsSpecialBoundary = variant.includes(".");
-    const escapedVariant = variant.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
-    const wordBoundaryPattern = needsSpecialBoundary
-      ? escapedVariant
-      : `\\b${escapedVariant}\\b`;
+      // Für Namen mit Punkten, verwende spezifischere Ersetzungsmuster
+      const needsSpecialBoundary = currentVariant.includes(".");
+      const escapedVariant = currentVariant.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+      const wordBoundaryPattern = needsSpecialBoundary
+        ? escapedVariant
+        : `\\b${escapedVariant}\\b`;
 
-    if (needsSpecialBoundary) {
-    } else {
+      if (needsSpecialBoundary) {
+      } else {
       // Handle parentheses with multiple entries separated by slashes first
       const parenthesesPattern = new RegExp(
         `\\(([^/]*?\\s*)?${escapedVariant}\\s*/\\s*([^)]+)\\)`,
@@ -7384,49 +8517,82 @@ function removeMerchantNameFromTitle(title, merchant) {
         result = result.replace(parenthesesPattern, `(${newContent})`);
       }
 
-      // Standard patterns for merchant names without punctuation
+      // Standard patterns for merchant names without punctuation - ALLE mit globalem Flag
       result = result
-        .replace(new RegExp(`\\s+bei\\s+${wordBoundaryPattern}\\s+`, "i"), " ")
+        .replace(new RegExp(`\\s+bei\\s+${wordBoundaryPattern}\\s+`, "gi"), " ")
         .replace(
-          new RegExp(`\\s+(?:bei\\s+)?${escapedVariant}(?:[-–]|\\s)*$`, "i"),
+          new RegExp(`\\s+(?:bei\\s+)?${escapedVariant}(?:[-–]|\\s)*$`, "gi"),
           ""
         )
-        .replace(new RegExp(`\\s+auf\\s+${escapedVariant}$`, "i"), "")
-        .replace(new RegExp(`\\s+auf\\s+${escapedVariant}(?=\\s|$)`, "i"), "");
-    }
+        .replace(new RegExp(`\\s+auf\\s+${escapedVariant}$`, "gi"), "")
+        .replace(new RegExp(`\\s+auf\\s+${escapedVariant}(?=\\s|$)`, "gi"), "");
+      }
 
-    result = result
-      // Die restlichen Standardmuster
-      .replace(new RegExp(`\\(${escapedVariant}:\\s*`, "i"), "(")
-      .replace(new RegExp(`${escapedVariant}:\\s*`, "i"), "")
+      result = result
+        // WICHTIG: Runden-Klammern-Pattern ZUERST, bevor andere Patterns die Struktur zerstören!
+        // Händler in runden Klammern ÜBERALL im Titel (GLOBAL - alle Vorkommen)
+        // Beispiel 1: "(Lidl)" -> "" (komplett weg, weil nur Händlername)
+        // Beispiel 2: "(mit Lidl App)" -> "(mit App)" (Händler weg, Rest bleibt)
+        // Beispiel 3: "(Aliexpress Münzdeal)" -> "(Münzdeal)" (nur Händler weg, Rest bleibt)
+        .replace(new RegExp(`\\(([^)]*)\\b${escapedVariant}\\b([^)]*)\\)`, "gi"), (match, before, after) => {
+          const cleanedBefore = before.trim();
+          const cleanedAfter = after.trim();
 
-      // Händler am Anfang (mit optionalem Punkt danach)
-      .replace(new RegExp(`^${escapedVariant}\\s*\\.?\\s*[-–]?\\s*`, "i"), "")
+          // Wenn nichts übrig bleibt, entferne die komplette Klammer
+          if (!cleanedBefore && !cleanedAfter) {
+            return "";
+          }
 
-      // FIX: Händler in eckigen Klammern mit optionalen Leerzeichen
-      .replace(new RegExp(`\\[\\s*${escapedVariant}\\s*\\]\\s*`, "i"), "")
+          // Kombiniere was übrig bleibt
+          const parts = [cleanedBefore, cleanedAfter].filter(Boolean);
+          // FIX: Gib die Klammern MIT dem übrig gebliebenen Inhalt zurück
+          return `(${parts.join(" ")})`;
+        })
 
-      // Händler mit Punkt als Trenner
-      .replace(new RegExp(`^${escapedVariant}\\.\\s*`, "i"), "")
-      .replace(new RegExp(`\\s+${escapedVariant}\\.\\s+`, "i"), " ")
-      .replace(new RegExp(`\\s+${escapedVariant}\\.\\s*$`, "i"), "")
+        // Entferne leere Klammern die durch vorherige Operationen entstanden sind
+        .replace(/\(\s*\)/g, "")
 
-      // Händler in Klammern mit fehlenden Klammern
-      .replace(new RegExp(`^${escapedVariant}\\)\\s*`, "i"), "")
-      .replace(new RegExp(`\\(${escapedVariant}$`, "i"), "")
+        // Die restlichen Standardmuster - ALLE mit globalem Flag (g) für multiple Vorkommen
+        .replace(new RegExp(`\\(${escapedVariant}:\\s*`, "gi"), "(")
+        .replace(new RegExp(`${escapedVariant}:\\s*`, "gi"), "")
 
-      .replace(new RegExp(`\\(${escapedVariant}\\s+`, "i"), "(")
+        // Händler am Anfang (mit optionalem Punkt danach)
+        .replace(new RegExp(`^${escapedVariant}\\s*\\.?\\s*[-–]?\\s*`, "gi"), "")
 
-      // NEU: Händler mitten im Titel (mit Wortgrenzen)
-      // Beispiel: "(CB) Kärcher Waschsauger" -> "(CB) Waschsauger"
-      .replace(new RegExp(`\\b${escapedVariant}\\b\\s+`, "i"), "");
-  });
+        // FIX: Händler in eckigen Klammern mit optionalen Leerzeichen
+        .replace(new RegExp(`\\[\\s*${escapedVariant}\\s*\\]\\s*`, "gi"), "")
+
+        // NEU: Händler-Komposita in eckigen Klammern (z.B. "[Lidl-Angebote]")
+        .replace(new RegExp(`\\[\\s*${escapedVariant}[-\\s]?[^\\]]*\\]\\s*`, "gi"), "")
+
+        // Händler mit Punkt als Trenner
+        .replace(new RegExp(`^${escapedVariant}\\.\\s*`, "gi"), "")
+        .replace(new RegExp(`\\s+${escapedVariant}\\.\\s+`, "gi"), " ")
+        .replace(new RegExp(`\\s+${escapedVariant}\\.\\s*$`, "gi"), "")
+
+        // Händler in Klammern mit fehlenden Klammern
+        .replace(new RegExp(`^${escapedVariant}\\)\\s*`, "gi"), "")
+        .replace(new RegExp(`\\(${escapedVariant}$`, "gi"), "")
+
+        // NEU: Händler mitten im Titel (mit Wortgrenzen)
+        // Beispiel: "(CB) Kärcher Waschsauger" -> "(CB) Waschsauger"
+        .replace(new RegExp(`\\b${escapedVariant}\\b\\s+`, "gi"), "")
+
+        // NEU: "bei Händler" + Domain-TLD am Ende (z.B. "bei Druckerzubehör.de")
+        .replace(new RegExp(`\\s+bei\\s+${escapedVariant}\\.(de|com|co\\.uk)\\s*$`, "gi"), "")
+        .replace(new RegExp(`\\s+bei\\s+${escapedVariant}\\.(de|com|co\\.uk)(?=\\s)`, "gi"), "")
+
+        // NEU: Händler vor @domain.tld (z.B. "Packungen Tassimo @ Tassimo.de")
+        .replace(new RegExp(`\\b${escapedVariant}\\b\\s*@\\s*${escapedVariant}\\.(de|com|co\\.uk)`, "gi"), "@$2.$1")
+        .replace(new RegExp(`\\s+@\\s*${escapedVariant}\\.(de|com|co\\.uk)`, "gi"), "");
+    }); // Ende variantsToCheck.forEach
+  }); // Ende merchantVariants.forEach
 
   const finalResult = result.replace(/\s+/g, " ").trim();
 
   // Nur loggen wenn sich tatsächlich was geändert hat
   if (DEBUG.hideMatchingMerchantNames && title !== finalResult) {
-    console.log("[MDM MerchantNames] ✂️ Removed '"+merchant+"':", {
+    console.log(`[${getDebugTimestamp()}] [MDM MerchantNames] ✂️ Removed '`+merchant+`':`, {
       from: title,
       to: finalResult
     });
@@ -7476,6 +8642,9 @@ function cleanup() {
   if (blockedUsersDiv?.parentNode) {
     blockedUsersDiv.remove();
   }
+  if (window.whitelistDiv?.parentNode) {
+    window.whitelistDiv.remove();
+  }
 
   // Reset UI states with logging
   if (activeSubUI) {
@@ -7487,6 +8656,10 @@ function cleanup() {
       words: {
         id: "showWordsListButton",
         html: '<i class="fas fa-list"></i> Wortfilter verwalten',
+      },
+      whitelist: {
+        id: "showWhitelistButton",
+        html: '<i class="fas fa-shield-alt"></i> Whitelist verwalten',
       },
       users: {
         id: "showBlockedUsersButton",
@@ -7963,6 +9136,24 @@ function addMerchantPageHideButton() {
 //#endregion
 
 //#region --- 11. Skript-Initialisierung ---
+// ===== WICHTIG: DEBUG-Config ZUERST laden =====
+Object.assign(DEBUG, loadDebugConfig());
+
+registerDebugMenu();
+
+// Initial Debug Check
+if (
+  DEBUG.performance.enabled ||
+  DEBUG.userBlocking ||
+  DEBUG.backup ||
+  DEBUG.hideMatchingMerchantNames ||
+  DEBUG.priceFilter ||
+  DEBUG.criticalErrors ||
+  DEBUG.wordFilter
+) {
+  console.log("[MDM] Script loaded with DEBUG flags:", DEBUG);
+}
+
 // Initial beim Start aufrufen
 registerMenuCommands();
 
@@ -8046,10 +9237,14 @@ function loadDebugConfig() {
       false
     ),
     priceFilter: GM_getValue("debug.priceFilter", false),
+    priceFilterVerbose: GM_getValue("debug.priceFilterVerbose", false),
+    merchantFilter: GM_getValue("debug.merchantFilter", false),
+    merchantInfoVerbose: GM_getValue("debug.merchantInfoVerbose", false),
     userBlocking: GM_getValue("debug.userBlocking", false),
     backup: GM_getValue("debug.backup", false),
     criticalErrors: GM_getValue("debug.criticalErrors", false),
     wordFilter: GM_getValue("debug.wordFilter", false),
+    wordFilterVerbose: GM_getValue("debug.wordFilterVerbose", false),
     performance: {
       enabled: GM_getValue("debug.performance.enabled", false),
       observer: GM_getValue("debug.performance.observer", false),
@@ -8059,6 +9254,7 @@ function loadDebugConfig() {
       domManipulation: GM_getValue("debug.performance.domManipulation", false),
       timing: GM_getValue("debug.performance.timing", false),
       summary: GM_getValue("debug.performance.summary", false),
+      lazyRenderSummary: GM_getValue("debug.performance.lazyRenderSummary", false),
     },
   };
 }
@@ -8098,7 +9294,11 @@ function toggleAllDebugFlags() {
   // Check if any flag is currently enabled
   const anyEnabled =
     DEBUG.wordFilter ||
+    DEBUG.wordFilterVerbose ||
     DEBUG.priceFilter ||
+    DEBUG.priceFilterVerbose ||
+    DEBUG.merchantFilter ||
+    DEBUG.merchantInfoVerbose ||
     DEBUG.userBlocking ||
     DEBUG.backup ||
     DEBUG.criticalErrors ||
@@ -8110,7 +9310,8 @@ function toggleAllDebugFlags() {
     DEBUG.performance.caching ||
     DEBUG.performance.domManipulation ||
     DEBUG.performance.timing ||
-    DEBUG.performance.summary;
+    DEBUG.performance.summary ||
+    DEBUG.performance.lazyRenderSummary;
 
   const newState = !anyEnabled;
 
@@ -8118,10 +9319,14 @@ function toggleAllDebugFlags() {
   const simpleFlags = [
     "hideMatchingMerchantNames",
     "priceFilter",
+    "priceFilterVerbose",
+    "merchantFilter",
+    "merchantInfoVerbose",
     "userBlocking",
     "backup",
     "criticalErrors",
     "wordFilter",
+    "wordFilterVerbose",
   ];
 
   simpleFlags.forEach((flag) => {
@@ -8139,6 +9344,7 @@ function toggleAllDebugFlags() {
     "domManipulation",
     "timing",
     "summary",
+    "lazyRenderSummary",
   ];
 
   perfFlags.forEach((flag) => {
@@ -8211,9 +9417,6 @@ function openDebugPanel() {
                         }>
                         <span>🐛 Word Filter</span>
                     </label>
-                    <span class="mdm-debug-status">${
-                      DEBUG.wordFilter ? "✅" : "❌"
-                    }</span>
                 </div>
                 <div class="mdm-debug-toggle" data-flag="priceFilter">
                     <label>
@@ -8222,9 +9425,6 @@ function openDebugPanel() {
                         }>
                         <span>💰 Price Filter</span>
                     </label>
-                    <span class="mdm-debug-status">${
-                      DEBUG.priceFilter ? "✅" : "❌"
-                    }</span>
                 </div>
                 <div class="mdm-debug-toggle" data-flag="merchantFilter">
                     <label>
@@ -8233,9 +9433,6 @@ function openDebugPanel() {
                         }>
                         <span>🏪 Merchant Filter</span>
                     </label>
-                    <span class="mdm-debug-status">${
-                      DEBUG.merchantFilter ? "✅" : "❌"
-                    }</span>
                 </div>
                 <div class="mdm-debug-toggle" data-flag="userBlocking">
                     <label>
@@ -8244,18 +9441,12 @@ function openDebugPanel() {
                         }>
                         <span>👤 User Blocking</span>
                     </label>
-                    <span class="mdm-debug-status">${
-                      DEBUG.userBlocking ? "✅" : "❌"
-                    }</span>
                 </div>
                 <div class="mdm-debug-toggle" data-flag="backup">
                     <label>
                         <input type="checkbox" ${DEBUG.backup ? "checked" : ""}>
                         <span>💾 Backup/Restore</span>
                     </label>
-                    <span class="mdm-debug-status">${
-                      DEBUG.backup ? "✅" : "❌"
-                    }</span>
                 </div>
                 <div class="mdm-debug-toggle" data-flag="criticalErrors">
                     <label>
@@ -8264,9 +9455,6 @@ function openDebugPanel() {
                         }>
                         <span>⚠️ Critical Errors</span>
                     </label>
-                    <span class="mdm-debug-status">${
-                      DEBUG.criticalErrors ? "✅" : "❌"
-                    }</span>
                 </div>
                 <div class="mdm-debug-toggle" data-flag="hideMatchingMerchantNames">
                     <label>
@@ -8275,9 +9463,6 @@ function openDebugPanel() {
                         }>
                         <span>🏪 Merchant Names</span>
                     </label>
-                    <span class="mdm-debug-status">${
-                      DEBUG.hideMatchingMerchantNames ? "✅" : "❌"
-                    }</span>
                 </div>
             </div>
 
@@ -8290,9 +9475,6 @@ function openDebugPanel() {
                         }>
                         <span>📊 Performance (Master)</span>
                     </label>
-                    <span class="mdm-debug-status">${
-                      DEBUG.performance.enabled ? "✅" : "❌"
-                    }</span>
                 </div>
                 <div class="mdm-debug-toggle" data-flag="performance.observer">
                     <label>
@@ -8301,9 +9483,6 @@ function openDebugPanel() {
                         }>
                         <span>🔍 Observer</span>
                     </label>
-                    <span class="mdm-debug-status">${
-                      DEBUG.performance.observer ? "✅" : "❌"
-                    }</span>
                 </div>
                 <div class="mdm-debug-toggle" data-flag="performance.processing">
                     <label>
@@ -8312,9 +9491,6 @@ function openDebugPanel() {
                         }>
                         <span>⚙️ Processing</span>
                     </label>
-                    <span class="mdm-debug-status">${
-                      DEBUG.performance.processing ? "✅" : "❌"
-                    }</span>
                 </div>
                 <div class="mdm-debug-toggle" data-flag="performance.filtering">
                     <label>
@@ -8323,9 +9499,6 @@ function openDebugPanel() {
                         }>
                         <span>🔎 Filtering</span>
                     </label>
-                    <span class="mdm-debug-status">${
-                      DEBUG.performance.filtering ? "✅" : "❌"
-                    }</span>
                 </div>
                 <div class="mdm-debug-toggle" data-flag="performance.caching">
                     <label>
@@ -8334,9 +9507,6 @@ function openDebugPanel() {
                         }>
                         <span>💾 Caching</span>
                     </label>
-                    <span class="mdm-debug-status">${
-                      DEBUG.performance.caching ? "✅" : "❌"
-                    }</span>
                 </div>
                 <div class="mdm-debug-toggle" data-flag="performance.domManipulation">
                     <label>
@@ -8345,9 +9515,6 @@ function openDebugPanel() {
                         }>
                         <span>🎨 DOM Manipulation</span>
                     </label>
-                    <span class="mdm-debug-status">${
-                      DEBUG.performance.domManipulation ? "✅" : "❌"
-                    }</span>
                 </div>
                 <div class="mdm-debug-toggle" data-flag="performance.timing">
                     <label>
@@ -8356,9 +9523,6 @@ function openDebugPanel() {
                         }>
                         <span>⏱️ Timing</span>
                     </label>
-                    <span class="mdm-debug-status">${
-                      DEBUG.performance.timing ? "✅" : "❌"
-                    }</span>
                 </div>
                 <div class="mdm-debug-toggle" data-flag="performance.summary">
                     <label>
@@ -8367,9 +9531,14 @@ function openDebugPanel() {
                         }>
                         <span>📈 Summary</span>
                     </label>
-                    <span class="mdm-debug-status">${
-                      DEBUG.performance.summary ? "✅" : "❌"
-                    }</span>
+                </div>
+                <div class="mdm-debug-toggle" data-flag="performance.lazyRenderSummary">
+                    <label>
+                        <input type="checkbox" ${
+                          DEBUG.performance.lazyRenderSummary ? "checked" : ""
+                        }>
+                        <span>⏳ Kurzprotokoll verzögerte Deals</span>
+                    </label>
                 </div>
             </div>
         </div>
@@ -8396,17 +9565,9 @@ function openDebugPanel() {
   panel.querySelectorAll(".mdm-debug-toggle").forEach((toggle) => {
     const checkbox = toggle.querySelector('input[type="checkbox"]');
     const flagPath = toggle.dataset.flag;
-    const statusSpan = toggle.querySelector(".mdm-debug-status");
 
     checkbox.addEventListener("change", () => {
       toggleDebugFlag(flagPath, flagPath);
-      // Status-Icon aktualisieren
-      const keys = flagPath.split(".");
-      let current = DEBUG;
-      for (const key of keys) {
-        current = current[key];
-      }
-      statusSpan.textContent = current ? "✅" : "❌";
     });
   });
 
@@ -8443,6 +9604,11 @@ function openDebugPanel() {
 
 // ===== Tampermonkey Debug-Menü registrieren =====
 function registerDebugMenu() {
+  // Debug-Menü nur registrieren wenn SHOW_DEBUG_MENU = true
+  if (!SHOW_DEBUG_MENU) {
+    return;
+  }
+
   GM_registerMenuCommand("🐛 Debug: Logs / Toggles...", () => {
     openDebugPanel();
   });
@@ -8477,7 +9643,8 @@ debugPanelStyle.textContent = `
         top: 50%;
         left: 50%;
         transform: translate(-50%, -50%);
-        width: 400px;
+        width: fit-content;
+        min-width: 280px;
         max-width: 90vw;
         max-height: 80vh;
         background: #ffffff;
@@ -8571,7 +9738,6 @@ debugPanelStyle.textContent = `
 
     .mdm-debug-toggle {
         display: flex;
-        justify-content: space-between;
         align-items: center;
         padding: 8px 10px;
         margin-bottom: 5px;
@@ -8590,18 +9756,14 @@ debugPanelStyle.textContent = `
         gap: 8px;
         cursor: pointer;
         flex: 1;
+        white-space: nowrap;
     }
 
     .mdm-debug-toggle input[type="checkbox"] {
         width: 18px;
         height: 18px;
         cursor: pointer;
-    }
-
-    .mdm-debug-status {
-        font-size: 16px;
-        min-width: 24px;
-        text-align: center;
+        flex-shrink: 0;
     }
 
     #mdm-debug-toggle-all:hover {
@@ -8609,23 +9771,6 @@ debugPanelStyle.textContent = `
     }
 `;
 document.head.appendChild(debugPanelStyle);
-
-// ===== Debug-Config laden und Menü registrieren =====
-Object.assign(DEBUG, loadDebugConfig());
-registerDebugMenu();
-
-// Initial Debug Check
-if (
-  DEBUG.performance.enabled ||
-  DEBUG.userBlocking ||
-  DEBUG.backup ||
-  DEBUG.hideMatchingMerchantNames ||
-  DEBUG.priceFilter ||
-  DEBUG.criticalErrors ||
-  DEBUG.wordFilter
-) {
-  console.log("[MDM] Script loaded with DEBUG flags:", DEBUG);
-}
 
 //#endregion
 
