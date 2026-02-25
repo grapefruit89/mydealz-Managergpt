@@ -1,3 +1,9 @@
+/**
+ * @file tests/word-filtering.vitest
+ * @description Legacy-Regressionstests für alte Wortfilter-Logik (referenzorientiert).
+ * @status deprecated
+ */
+
 import { describe, it, expect } from 'vitest';
 
 function testWordFiltering(excludeWords, processedTitle) {

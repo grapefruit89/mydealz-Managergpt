@@ -1,0 +1,14 @@
+{
+  "name": "mydealz-managergpt",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Build tooling for mydealz Manager userscript",
+  "_meta": {
+    "file": "package.json",
+    "purpose": "Minimales Build-Manifest für die Erzeugung des finalen Userscripts",
+    "entryScript": "build.js"
+  },
+  "scripts": {
+    "build": "node build.js"
+  }
+}

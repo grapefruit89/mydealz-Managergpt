@@ -1,3 +1,9 @@
+<!--
+@file README.md
+@description Projektübersicht und Entwicklerdokumentation für mydealz Manager.
+@quick-nav Installation, Features, Build-Prozess, Repository-Struktur.
+-->
+
 # mydealz Manager
 
 Ein Userscript zur Verwaltung und Filterung von Deals auf mydealz.de und preisjaeger.at.
@@ -47,3 +53,42 @@ MIT
 ## Diskussion
 
 [Diskussionsthread auf mydealz](https://www.mydealz.de/diskussion/tampermonkey-script-fur-mydealz-2299700)
+
+
+## Repository-Cleanup
+
+- Historische und deprecated Inhalte wurden aus dem Root in `archive/legacy/` verschoben.
+- Aktive Entwicklung findet nur noch in `src/parts/` statt; erzeugt wird ausschließlich `dist/mydealz-manager.user.js`.
+- Relevante Projektdateien enthalten jetzt kompakte Metadaten-Header (oder `_meta` in JSON), damit Zweck und Zuständigkeit sofort sichtbar sind.
+
+## Entwicklungsstruktur (neu)
+
+Für eine wartbare Weiterentwicklung ist das Userscript jetzt in Build-Teile aufgeteilt und wird anschließend wieder zu **einer einzigen Datei** zusammengesetzt.
+
+```text
+src/
+  parts/
+    00-metadata.js      # Tampermonkey Header (@name, @match, @grant, ...)
+    10-main.js          # Vollständige App-Logik (IIFE, Klassen, Observer, UI, Filter)
+dist/
+  mydealz-manager.user.js  # Fertiges Userscript (für Installation/Test)
+build.js                    # Node.js Build-Skript (concat + output)
+```
+
+### Build ausführen
+
+1. Stelle sicher, dass Node.js installiert ist.
+2. Im Repository ausführen:
+
+```bash
+npm run build
+```
+
+Alternativ direkt:
+
+```bash
+node build.js
+```
+
+Das erzeugt/aktualisiert:
+- `dist/mydealz-manager.user.js`
