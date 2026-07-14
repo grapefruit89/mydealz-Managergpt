@@ -65,23 +65,22 @@
 
 ### Als Browser Extension (empfohlen)
 
-1. Repository klonen oder als ZIP herunterladen
-2. Build ausführen:
-   ```bash
-   node build.js
-   ```
-3. In Chrome/Edge/Brave öffnen: `chrome://extensions`
-4. **Entwicklermodus** aktivieren (oben rechts)
-5. **Entpackte Erweiterung laden** → den Projektordner auswählen (nicht `dist/`, sondern den Root)
-6. Auf mydealz.de gehen — die Extension läuft sofort
+Kein Node.js, kein Build-Schritt. Fertige ZIPs werden automatisch bei jedem Release gebaut.
 
-> **Hinweis:** Icons (`icons/icon16.png`, `icons/icon48.png`, `icons/icon128.png`) müssen vorhanden sein. Platzhalter reichen für den Test.
+1. Zur [Releases-Seite](https://github.com/grapefruit89/mydealz-Managergpt/releases/latest) gehen
+2. Unter **Assets** → `mydealz-manager-ext.zip` herunterladen
+3. ZIP entpacken (normales Entpacken reicht)
+4. Chrome/Edge/Brave öffnen: `chrome://extensions`
+5. **Entwicklermodus** aktivieren (Toggle oben rechts)
+6. **"Entpackte Erweiterung laden"** → den entpackten Ordner auswählen
+7. Auf mydealz.de gehen — fertig ✓
+
+> **Für Entwickler:** Wer den Quellcode selbst bauen will: `node build.js` (kein npm install nötig).
 
 ### Als Tampermonkey-Userscript
 
 1. [Tampermonkey](https://www.tampermonkey.net/) installieren
-2. `node build.js` ausführen
-3. `dist/userscript.js` in Tampermonkey importieren (oder den Inhalt in ein neues Script kopieren)
+2. `dist/userscript.js` aus dem Release-ZIP in Tampermonkey importieren
 
 Das Userscript verwendet GM_setValue/GM_getValue statt chrome.storage — der Build ersetzt den Storage-Layer automatisch per Shim.
 
