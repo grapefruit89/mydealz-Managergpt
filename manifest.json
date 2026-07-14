@@ -1,0 +1,51 @@
+{
+  "manifest_version": 3,
+  "name": "mydealz Manager",
+  "version": "2.0.0",
+  "description": "Deals filtern, Händler/User blocken, Preis- und Temperaturgrenzen setzen – jetzt als echte Browser-Erweiterung.",
+  "author": "Flo (9jS2PL5T) & Moritz Baumeister (grapefruit89)",
+
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+
+  "host_permissions": [
+    "https://www.mydealz.de/*",
+    "https://www.preisjaeger.at/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.mydealz.de/*",
+        "https://www.preisjaeger.at/*"
+      ],
+      "js": ["dist/content.js"],
+      "css": ["dist/content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "mydealz Manager",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+
+  "web_accessible_resources": []
+}

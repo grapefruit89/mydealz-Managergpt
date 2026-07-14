@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mydealz Manager</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      font-size: 13px;
+      color: #222;
+      width: 340px;
+      background: #fff;
+    }
+
+    header {
+      background: #e8173a;
+      color: #fff;
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    header h1 {
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    header .version {
+      margin-left: auto;
+      font-size: 11px;
+      opacity: 0.75;
+    }
+
+    .section {
+      padding: 12px 16px;
+      border-bottom: 1px solid #eee;
+    }
+
+    .section:last-child { border-bottom: none; }
+
+    label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 5px;
+      font-size: 12px;
+      color: #555;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    input[type="text"],
+    input[type="number"],
+    textarea {
+      width: 100%;
+      border: 1px solid #ddd;
+      border-radius: 5px;
+      padding: 6px 8px;
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    input:focus, textarea:focus { border-color: #e8173a; }
+
+    textarea {
+      resize: vertical;
+      min-height: 60px;
+    }
+
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .checkbox-row input[type="checkbox"] { cursor: pointer; }
+    .checkbox-row span { cursor: pointer; user-select: none; }
+
+    .tag-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-top: 6px;
+    }
+
+    .tag {
+      background: #f3f3f3;
+      border: 1px solid #ddd;
+      border-radius: 12px;
+      padding: 2px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .tag:hover { background: #fde; border-color: #e8173a; }
+
+    .tag .x { color: #e8173a; font-weight: 700; }
+
+    .stat-row {
+      display: flex;
+      gap: 12px;
+      margin-top: 4px;
+    }
+
+    .stat {
+      text-align: center;
+      flex: 1;
+      background: #f7f7f7;
+      border-radius: 6px;
+      padding: 8px;
+    }
+
+    .stat .num {
+      font-size: 20px;
+      font-weight: 700;
+      color: #e8173a;
+      display: block;
+    }
+
+    .stat .lbl {
+      font-size: 11px;
+      color: #888;
+    }
+
+    footer {
+      display: flex;
+      gap: 8px;
+      padding: 10px 16px;
+      border-top: 1px solid #eee;
+    }
+
+    button {
+      flex: 1;
+      border: none;
+      border-radius: 5px;
+      padding: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+
+    button:hover { opacity: 0.85; }
+
+    .btn-save   { background: #e8173a; color: #fff; }
+    .btn-reset  { background: #eee; color: #555; }
+    .btn-export { background: #f0f0f0; color: #333; font-size: 11px; flex: 0 0 auto; padding: 8px 12px; }
+
+    .saved-msg {
+      display: none;
+      color: #2a7;
+      font-size: 12px;
+      text-align: center;
+      padding: 4px 0;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+    <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+    <path d="M2 17l10 5 10-5"/>
+    <path d="M2 12l10 5 10-5"/>
+  </svg>
+  <h1>mydealz Manager</h1>
+  <span class="version">v2.0</span>
+</header>
+
+<!-- Stats -->
+<div class="section" id="stats-section">
+  <div class="stat-row">
+    <div class="stat">
+      <span class="num" id="stat-hidden">–</span>
+      <span class="lbl">Versteckt</span>
+    </div>
+    <div class="stat">
+      <span class="num" id="stat-merchants">–</span>
+      <span class="lbl">Händler blockiert</span>
+    </div>
+    <div class="stat">
+      <span class="num" id="stat-words">–</span>
+      <span class="lbl">Ausblend-Wörter</span>
+    </div>
+  </div>
+</div>
+
+<!-- Exclude words -->
+<div class="section">
+  <label>Wörter ausblenden</label>
+  <input type="text" id="exclude-words" placeholder="gaming, apple, crypto, ...">
+</div>
+
+<!-- Whitelist -->
+<div class="section">
+  <label>Whitelist (nie verstecken)</label>
+  <input type="text" id="whitelist-words" placeholder="lego, kindle, ...">
+</div>
+
+<!-- Blocked users -->
+<div class="section">
+  <label>User blocken</label>
+  <input type="text" id="blocked-users" placeholder="username1, username2, ...">
+</div>
+
+<!-- Blocked merchants -->
+<div class="section">
+  <label>Händler blockiert</label>
+  <div class="tag-list" id="merchant-tags"></div>
+  <p id="no-merchants" style="color:#aaa;font-size:12px;margin-top:4px;">
+    Keine – Händler direkt auf mydealz.de über ⚙ blockieren
+  </p>
+</div>
+
+<!-- Max price + Min discount -->
+<div class="section">
+  <div style="display: flex; gap: 8px;">
+    <div style="flex: 1;">
+      <label>Max. Preis (€)</label>
+      <input type="number" id="max-price" min="0" step="0.01" placeholder="kein Limit">
+    </div>
+    <div style="flex: 1;">
+      <label>Mind. Rabatt (%)</label>
+      <input type="number" id="min-discount" min="0" max="100" step="1" placeholder="kein Limit">
+    </div>
+  </div>
+</div>
+
+<!-- Toggles -->
+<div class="section">
+  <div style="display: flex; flex-direction: column; gap: 6px;">
+    <div class="checkbox-row">
+      <input type="checkbox" id="hide-cold">
+      <span onclick="document.getElementById('hide-cold').click()">Kalte Deals (&lt;0°) ausblenden</span>
+    </div>
+    <div class="checkbox-row">
+      <input type="checkbox" id="hide-own-cold">
+      <span onclick="document.getElementById('hide-own-cold').click()">Eigene Cold-Votes ausblenden</span>
+    </div>
+    <div class="checkbox-row">
+      <input type="checkbox" id="hide-merchant-names">
+      <span onclick="document.getElementById('hide-merchant-names').click()">Händlernamen auch im Titel prüfen</span>
+    </div>
+    <div class="checkbox-row">
+      <input type="checkbox" id="debug-mode">
+      <span onclick="document.getElementById('debug-mode').click()">Debug-Modus</span>
+    </div>
+  </div>
+</div>
+
+<div class="saved-msg" id="saved-msg">✓ Gespeichert!</div>
+
+<footer>
+  <button class="btn-reset" id="btn-reset">Zurücksetzen</button>
+  <button class="btn-export" id="btn-export" title="Einstellungen exportieren">⬇ Export</button>
+  <button class="btn-save" id="btn-save">Speichern</button>
+</footer>
+
+<script src="popup.js"></script>
+</body>
+</html>
