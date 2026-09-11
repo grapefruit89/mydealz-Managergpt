@@ -146,10 +146,13 @@ function _temp(text) {
 
 function _discountPct(el) {
   if (!el) return null;
-  // "-58% " or "+38%" — parse to signed integer
+  // Badge "-58%" / "+38%" → Canon: POSITIV = Ersparnis (DealNormalizer-Convention)
+  // "-58%" → 58 (Ersparnis), "+38%" → -38 (Preis-Markup)
   const raw = el.textContent?.trim() ?? '';
   const m = raw.match(/([-+]?\d+)/);
-  return m ? parseInt(m[1], 10) : null;
+  if (!m) return null;
+  const v = parseInt(m[1], 10);
+  return v == null ? null : -v;
 }
 
 function _userVote(el) {
@@ -271,7 +274,7 @@ function _fromState(t, el, dealId) {
     price:        isNaN(price) ? null : price,
     priceOrig:    (!isNaN(priceOrigState) && priceOrigState != null) ? priceOrigState : null,
     discount:     discountEl?.textContent?.trim() || null,
-    discountPct,          // signed integer: -58 = 58% saving
+    discountPct,          // Canon: positiv = Ersparnis (DealNormalizer)
     shipping:     null,
     temperature:  isNaN(temperature) ? null : temperature,
     isHot:        temperature != null && temperature > 0,
@@ -313,7 +316,7 @@ function _fromDom(el, dealId) {
   const origEl    = _first(el, ...SEL.priceOrigSelectors);
   const priceOrig = _price(origEl?.textContent);
   const discountEl  = _first(el, ...SEL.discountSelectors);
-  const discountPct = _discountPct(discountEl); // e.g. -58 (negative = saving)
+  const discountPct = _discountPct(discountEl); // Canon: positiv = Ersparnis
   const discount    = discountEl?.textContent?.trim() || null; // raw string "-58%"
 
   // Temperature — try .overflow--wrap-off text first, then title attribute
@@ -358,7 +361,7 @@ function _fromDom(el, dealId) {
     price,
     priceOrig,
     discount,           // raw string "-58% "
-    discountPct,        // signed integer: -58 means 58% saving, +10 means 10% markup
+    discountPct,        // Canon: positiv = Ersparnis, negativ = Preis-Markup
     shipping,
     temperature,
     isHot:        temperature != null ? temperature > 0 : isHot,

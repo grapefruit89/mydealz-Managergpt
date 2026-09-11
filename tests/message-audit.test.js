@@ -27,6 +27,7 @@ const SCAN_FILES = [
   'src/core/settings-store.js',
   'src/core/storage.js',
   'src/core/deal-parser.js',
+  'src/core/deal-normalizer.js',
   'src/core/prompt-levels.js',
   'src/core/message-types.js',
   'src/features/exporter.js',

@@ -234,7 +234,7 @@ const DealFilterEngine = (() => {
       if (deal.discountPct == null) {
         return hidden(`Kein Rabatt (mind. ${minDiscount}% gefordert)`);
       }
-      const savingPct = -deal.discountPct; // discountPct ist negativ für Ersparnis
+      const savingPct = deal.discountPct; // Canon: positiv = Ersparnis (DealNormalizer)
       if (savingPct < minDiscount) {
         return hidden(`Rabatt ${savingPct}% < Minimum ${minDiscount}%`);
       }

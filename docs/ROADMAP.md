@@ -26,7 +26,7 @@
 
 ## 2. Ideen-Liste (mit Quelle, nach ROI sortiert)
 
-### 🔴 2.1 Lokal eingeschränkte Deals farblich absetzen ⭐ NEU
+### 🔴 2.1 Lokal eingeschränkte Deals farblich absetzen ⭐ NEU (Datenbasis: DealNormalizer, §2.5 erledigt)
 - **Quelle:** mydealz-Feedback-Thread von DCMedien: `https://www.mydealz.de/feedback/stark-eingeschrankte-lokale-angebote-farblich-absetzen-2837807`
   (Idee: MediaMarkt×Lieferando-/US-CA-Store-/Stadt-Deals beim Scrollen farblich erkennen, statt zu lesen)
 - **Kontext:** Community antwortete, mydealz/Atolls wird das **niemals** einbauen (nicht geschäftsfördernd, zu aufwändig, Design-Gründe) — typischer Fall „Extension macht das, wo die Plattform nicht kann". HELPFUL-Reaction auf diese Einschätzung.

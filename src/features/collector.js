@@ -86,59 +86,6 @@ const Collector = (() => {
    * Normalisiert ein Thread-Objekt (GQL-Batch ODER State) in ein einheitliches Format.
    * Prinzip „one deal, one shape": alle Felder existieren, fehlende sind null.
    */
-  function _normalizeThread(t) {
-    if (!t) return null;
-    const id = String(t.threadId ?? t.id ?? '');
-    if (!id) return null;
-    const slug = t.slug ?? '';
-    const url  = t.url
-      ?? (t.urlPath ? `${location.origin}${t.urlPath}` : '')
-      ?? '';
-
-    const price      = _parsePrice(t.price ?? null);
-    const origRaw    = t.originalPrice ?? t.nextBestPrice ?? null;
-    const priceOrig  = _parsePrice(origRaw);
-    // Rabatt % aus GQL-Feld oder aus Preis-Delta (Export-Muster)
-    let discountPct  = t.discountPct ?? null;
-    if (discountPct == null && priceOrig && price != null && priceOrig > price) {
-      discountPct = Math.round((priceOrig - price) / priceOrig * 100);
-    }
-
-    const rawDesc = t.description ?? t.preparedDescription ?? '';
-    const isHtml  = /<[a-z][\s\S]*>/i.test(rawDesc);
-
-    return {
-      id,
-      title:       t.title ?? '',
-      price,
-      displayPrice: t.displayPrice ?? null,
-      originalPrice: priceOrig,
-      priceOff:    t.priceOff ?? null,
-      discountPct,
-      shippingFree: t.shippingFree ?? null,
-      temperature: typeof t.temperature === 'number' ? t.temperature : null,
-      merchant:    t.merchantName ?? t.merchant?.merchantName ?? '',
-      merchantId:  String(t.merchant?.merchantId ?? t.merchantId ?? ''),
-      username:    t.username ?? t.user?.username ?? '',
-      userId:      t.userId ?? t.user?.userId ?? '',
-      publishedAt: t.publishedAt ?? t.createdAt ?? '',  // unix-Sek ODER ISO — toMarkdown handhabt beides
-      isExpired:   !!(t.isExpired ?? t.expired),
-      description: isHtml ? _stripHtml(rawDesc) : (rawDesc ?? ''),
-      url,
-      commentCount: t.commentCount ?? 0,
-    };
-  }
-
-  function _parsePrice(raw) {
-    if (raw == null) return null;
-    if (typeof raw === 'number') return raw;
-    const n = parseFloat(String(raw).replace(',', '.').replace(/[^\d.]/g, ''));
-    return isNaN(n) ? null : n;
-  }
-
-  function _stripHtml(html) {
-    return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-  }
 
   // ── ID-Sammlung (verifiziertes Muster aus MydealzExporter listing.js) ──────
 
@@ -240,7 +187,7 @@ const Collector = (() => {
         price:       d.price,
         originalPrice: null,
         temperature: d.temperature,
-        merchant:    d.merchantName ?? '',
+        merchantName: d.merchantName ?? '',
         merchantId:  d.merchantId ?? '',
         username:    d.username ?? '',
         publishedAt: '',
@@ -278,7 +225,8 @@ const Collector = (() => {
           const threads = await GraphQLClient.fetchThreadBatch(ids, {
             onProgress: (done, total, label) => onProgress?.(done, total, label ?? '📋 Sammle Deals…'),
           });
-          deals = threads.map(_normalizeThread).filter(Boolean);
+          // fetchThreadBatch liefert bereits kanonische Objekte (DealNormalizer)
+          deals = threads.filter(Boolean);
         }
       } catch (e) {
         console.warn('[MDM Collector] GQL-Batch failed:', e.message);
@@ -330,7 +278,7 @@ const Collector = (() => {
       const link     = d.url ? `[↗](${d.url})` : '—';
 
       lines.push(
-        `| ${title}${expired} | ${priceStr} | ${tempStr} | ${d.merchant} | ${d.username} | ${dateStr} | ${link} |`
+        `| ${title}${expired} | ${priceStr} | ${tempStr} | ${d.merchantName} | ${d.username} | ${dateStr} | ${link} |`
       );
     }
 
@@ -345,7 +293,7 @@ const Collector = (() => {
       for (const d of withDesc) {
         const priceStr = d.price != null ? ` · ${d.price.toFixed(2).replace('.', ',')} €` : '';
         lines.push(`### ${d.title}${priceStr}`);
-        lines.push(`*${d.merchant} · @${d.username} · ${d.temperature != null ? d.temperature + '°' : ''}*`);
+        lines.push(`*${d.merchantName} · @${d.username} · ${d.temperature != null ? d.temperature + '°' : ''}*`);
         lines.push('');
         lines.push(d.description.substring(0, 300) + (d.description.length > 300 ? '…' : ''));
         if (d.url) lines.push(`🔗 ${d.url}`);

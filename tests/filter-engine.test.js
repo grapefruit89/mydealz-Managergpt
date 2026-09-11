@@ -121,4 +121,14 @@ assert(DealFilterEngine.evaluate({ ...base, isNsfw: true }, { ...s, mdm_hideNsfw
 assert(!DealFilterEngine.evaluate({ ...base, isNsfw: false }, { ...s, mdm_hideNsfw: true }).hide,
   'normaler Deal mit hideNsfw bleibt sichtbar');
 
+// ── Mindest-Rabatt (Canon: discountPct POSITIV = Ersparnis, DealNormalizer) ──
+assert(!DealFilterEngine.evaluate({ ...base, discountPct: 40 }, { ...s, mdm_minDiscount: 30 }).hide,
+  'Rabatt 40% ≥ Minimum 30% → sichtbar');
+assert(DealFilterEngine.evaluate({ ...base, discountPct: 12 }, { ...s, mdm_minDiscount: 30 }).hide,
+  'Rabatt 12% < Minimum 30% → hidden');
+assert(DealFilterEngine.evaluate({ ...base, discountPct: -5 }, { ...s, mdm_minDiscount: 30 }).hide,
+  'Preis-Markup (discountPct negativ) < Minimum → hidden');
+assert(!DealFilterEngine.evaluate({ ...base, discountPct: null }, s).hide,
+  'kein minDiscount gesetzt → Rabatt egal');
+
 console.log('filter-engine.test.js PASSED');

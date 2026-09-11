@@ -68,7 +68,7 @@ const { GraphQLClient, Collector } = loadBundle(moduleOrder(), {
   const { deals, total } = await Collector.collect({ limit: 100, onProgress: () => {} });
   assert(deals.length === 1, 'Pipeline: 1 Deal aus GQL-Batch');
   const d = deals[0];
-  assert(d.merchant === 'MediaMarkt', 'merchant korrekt normalisiert');
+  assert(d.merchantName === 'MediaMarkt', 'merchantName (Canon) korrekt normalisiert');
   assert(d.price === 35.9 && d.originalPrice === 59.99, 'Preise normalisiert');
   assert(d.discountPct === 40, 'discountPct aus Preis-Delta berechnet (59.99→35.9)');
   assert(d.description === 'HTML Beschreibung', 'Beschreibung HTML→Plaintext gestrippt');

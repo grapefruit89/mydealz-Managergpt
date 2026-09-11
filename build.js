@@ -27,6 +27,7 @@ const MODULE_ORDER = [
   'core/prompt-levels.js',      // SSOT: Prompt-Stufen des Exporters (VOR exporter)
   'core/settings-store.js',     // Einstellungen lesen/schreiben
   'core/deal-parser.js',        // DOM → Deal-Objekt
+  'core/deal-normalizer.js',    // SSOT: GQL-Thread-Normalisierung (VOR graphql-client)
   'core/graphql-client.js',     // GQL-Fetch mit Retry/429
   'core/settings-modal.js',     // Settings-Modal (CSS + öffnen/speichern)
   // ── Features ────────────────────────────────────────────────────────────────

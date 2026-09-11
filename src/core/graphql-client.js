@@ -213,71 +213,7 @@ const GraphQLClient = (() => {
    * Feldprinzip: alle Felder existieren, fehlende Werte sind null.
    */
   function _normalizeGqlThread(d, id) {
-    // Rabatt % aus GQL-Feld oder aus Preis-Delta berechnen (Export-Muster)
-    let discountPct = d.priceDiscount;
-    if (discountPct == null && d.nextBestPrice && d.price != null && d.nextBestPrice > d.price) {
-      discountPct = Math.round((d.nextBestPrice - d.price) / d.nextBestPrice * 100);
-    }
-
-    const iso = ts => (ts ? new Date(ts * 1000).toISOString() : null);
-
-    return {
-      id:             String(id),
-      // d.url ist oft relativ — absolutisieren. Fallback: ID-only URL
-      // (live verifiziert 2026-09-11: https://mydealz.de/<id> → 301 auf die
-      // echte Detailseite; /deals/<id> OHNE Slug wäre die "Ups"-Seite).
-      url:            _absolute(d.url) || `${location.origin}/${id}`,
-      shareLink:      d.shareableLink || '',
-      title:          d.title || '',
-      description:    _htmlToText(d.description),
-      descriptionHtml:d.description || '',
-      price:          d.price ?? null,
-      displayPrice:   d.displayPrice || null,
-      originalPrice:  d.nextBestPrice ?? null,
-      priceOff:       d.priceOff ?? null,
-      discountPct,    // signed: positiv = Ersparnis in %, null = unbekannt
-      shippingFree:   d.shipping?.isFree ?? null,
-      shippingPrice:  d.shipping?.price ?? null,
-      temperature:    d.temperature ?? null,
-      temperatureLevel: d.temperatureLevel ?? null,
-      commentCount:   d.commentCount ?? null,
-      isExpired:      d.isExpired ?? false,
-      voucherCode:    d.voucherCode || null,
-      type:           d.type ?? null,
-      username:       d.user?.username || '',
-      userId:         d.user?.userId ?? '',
-      merchantName:   d.merchant?.merchantName || '',
-      merchantId:     d.merchant?.merchantId ? String(d.merchant.merchantId) : '',
-      imageUrl:       _buildImageUrl(d.mainImage),
-      publishedAt:    iso(d.publishedAt),
-      createdAt:      iso(d.createdAt),
-      updatedAt:      iso(d.updatedAt),
-      group:          d.mainGroup?.threadGroupName || null,
-      groupPath:      (d.groupsPath ?? []).map(g => g.threadGroupName).filter(Boolean),
-      _source: 'graphql',
-    };
-  }
-
-  function _buildImageUrl(mainImage) {
-    if (!mainImage?.uid || !mainImage?.path) return null;
-    // Pepper-CDN-Muster: static.<domain>/{path}/{uid}/fs/895x577/qt/65/{uid}
-    // (mydealz.de live verifiziert 2026-09-11; hotukdeals.com/dealabs.com/pepper.pl/
-    //  nl.pepper.com nutzen dieselbe Engine — gleiche static-Host-Annahme)
-    return `https://static.${location.hostname}/${mainImage.path}/${mainImage.uid}/fs/895x577/qt/65/${mainImage.uid}`;
-  }
-
-  /** Relativ-URL (z. B. "/deals/foo-123") zu absoluter URL machen; '' bei leeren Werten. */
-  function _absolute(url) {
-    if (!url) return '';
-    return url.startsWith('http') ? url : `${location.origin}${url}`;
-  }
-
-  function _htmlToText(html) {
-    if (!html) return '';
-    const tmp = document.createElement('div');
-    tmp.innerHTML = html;
-    const text = tmp.innerText ?? tmp.textContent ?? '';
-    return text.replace(/\n{3,}/g, '\n\n').trim();
+    return DealNormalizer.normalizeThread(d, id);
   }
 
   // ── Kommentar-Queries (verifiziert, inkl. repliesPreview) ───────────────────
