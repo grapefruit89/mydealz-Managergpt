@@ -1,6 +1,6 @@
 /**
  * settings-store.js
- * Loads and saves all filter settings to chrome.storage.local.
+ * Loads and saves all filter settings via the StorageApi wrapper (storage.js).
  * Replaces the synchronous GM_getValue pattern with an async init() approach:
  *   await SettingsStore.init();
  *   SettingsStore.settings.hideColdDeals  // now safe to read synchronously
@@ -14,46 +14,13 @@
  *   Version 1 — initiales Schema (aktuelle Keyset)
  */
 
-// Aktuelle Schema-Version — bei Änderungen an STORAGE_KEYS erhöhen
-const MDM_SCHEMA_VERSION = 1;
+// Aktuelle Schema-Version — single source of truth ist settings-schema.js
+const MDM_SCHEMA_VERSION = MdmSchema.version;
 
-const STORAGE_KEYS = {
-  hiddenDeals:              'mdm_hiddenDeals',
-  excludeWords:             'mdm_excludeWords',
-  excludeMerchantsData:     'mdm_excludeMerchantsData',
-  blockedUsers:             'mdm_blockedUsers',
-  whitelistWords:           'mdm_whitelistWords',
-  hideColdDeals:            'mdm_hideColdDeals',
-  maxPrice:                 'mdm_maxPrice',
-  minDiscount:              'mdm_minDiscount',              // NEU: Mindest-Rabatt in %
-  hideOwnColdVotes:         'mdm_hideOwnColdVotes',        // NEU: selbst cold-gevotete Deals
-  hideMatchingMerchantNames:'mdm_hideMatchingMerchantNames',
-  debugEnabled:             'mdm_debugEnabled',
-  // Preis-Tier-System
-  tierEnabled:              'mdm_tierEnabled',             // master toggle
-  tierAMax:                 'mdm_tierAMax',               // ≤ X€ → Tier A (immer sichtbar)
-  tierBMax:                 'mdm_tierBMax',               // ≤ Y€ → Tier B (gedimmt); > Y€ → Tier C (ausgeblendet)
-  // Schema-Versionierung (immer als letztes)
-  schemaVersion:            'mdm_schemaVersion',
-};
+// Keys + Defaults kommen aus dem Schema (eine Quelle, keine Duplikate)
+const STORAGE_KEYS = MdmSchema.KEYS;
 
-const DEFAULTS = {
-  [STORAGE_KEYS.hiddenDeals]:               {},   // { [dealId]: true }
-  [STORAGE_KEYS.excludeWords]:              [],   // string[]
-  [STORAGE_KEYS.excludeMerchantsData]:      {},   // { [merchantId]: { name, id } }
-  [STORAGE_KEYS.blockedUsers]:              [],   // string[]
-  [STORAGE_KEYS.whitelistWords]:            [],   // string[]  (bypass hide for these)
-  [STORAGE_KEYS.hideColdDeals]:             false,
-  [STORAGE_KEYS.maxPrice]:                  null, // number|null
-  [STORAGE_KEYS.minDiscount]:               null, // number|null  (z.B. 20 = mind. 20% Rabatt)
-  [STORAGE_KEYS.hideOwnColdVotes]:          false, // true = selbst cold-gevotete Deals verstecken
-  [STORAGE_KEYS.hideMatchingMerchantNames]: false,
-  [STORAGE_KEYS.debugEnabled]:              false,
-  [STORAGE_KEYS.tierEnabled]:              false,
-  [STORAGE_KEYS.tierAMax]:                 100,   // in €, 50€-Schritte
-  [STORAGE_KEYS.tierBMax]:                 600,   // in €, 50€-Schritte
-  [STORAGE_KEYS.schemaVersion]:            0,     // 0 = Pre-Versioning-Installation
-};
+const DEFAULTS = MdmSchema.DEFAULTS;
 
 const SettingsStore = (() => {
   // Internal cache – populated after init()
@@ -92,7 +59,7 @@ const SettingsStore = (() => {
     updates[STORAGE_KEYS.schemaVersion] = MDM_SCHEMA_VERSION;
     _cache[STORAGE_KEYS.schemaVersion]  = MDM_SCHEMA_VERSION;
 
-    await chrome.storage.local.set(updates);
+    await StorageApi.setMany(updates);
 
     if (typeof Logger !== 'undefined') {
       Logger.info('SettingsStore', `Schema migriert: v${storedVersion} → v${MDM_SCHEMA_VERSION}`);
@@ -101,132 +68,170 @@ const SettingsStore = (() => {
 
   /** Load all settings from storage into the in-memory cache. */
   async function init() {
-    const raw = await chrome.storage.local.get(DEFAULTS);
+    const raw = await StorageApi.getWithDefaults(DEFAULTS);
     _cache = raw;
     await _migrate();
     return _cache;
   }
 
-  /** Return current in-memory settings (init() must have been called). */
-  function get settings() {
+  // NOTE: `settings` ist ein Getter auf dem Rückgabeobjekt unten
+  // (`get settings() { return _cache ?? {}; }`). Diese Convenience-Getter
+  // greifen über _requireCache() zu und werfen bewusst, wenn init() noch
+  // nicht gelaufen ist.
+  // ── Convenience getters (all synchronous after init) ──────────────────────
+
+  function _requireCache() {
     if (!_cache) throw new Error('[MDM] SettingsStore not initialised – call await SettingsStore.init() first');
     return _cache;
   }
 
-  // ── Convenience getters (all synchronous after init) ──────────────────────
-
-  function getHiddenDeals()         { return _cache[STORAGE_KEYS.hiddenDeals]; }
-  function getExcludeWords()        { return _cache[STORAGE_KEYS.excludeWords]; }
-  function getExcludeMerchants()    { return _cache[STORAGE_KEYS.excludeMerchantsData]; }
-  function getBlockedUsers()        { return _cache[STORAGE_KEYS.blockedUsers]; }
-  function getWhitelistWords()      { return _cache[STORAGE_KEYS.whitelistWords]; }
-  function getHideColdDeals()       { return _cache[STORAGE_KEYS.hideColdDeals]; }
-  function getMaxPrice()            { return _cache[STORAGE_KEYS.maxPrice]; }
-  function getMinDiscount()         { return _cache[STORAGE_KEYS.minDiscount]; }
-  function getHideOwnColdVotes()    { return _cache[STORAGE_KEYS.hideOwnColdVotes]; }
-  function getHideMerchantNames()   { return _cache[STORAGE_KEYS.hideMatchingMerchantNames]; }
-  function getDebugEnabled()        { return _cache[STORAGE_KEYS.debugEnabled]; }
-  function getTierEnabled()         { return _cache[STORAGE_KEYS.tierEnabled]; }
-  function getTierAMax()            { return _cache[STORAGE_KEYS.tierAMax]; }
-  function getTierBMax()            { return _cache[STORAGE_KEYS.tierBMax]; }
+  function getHiddenDeals()         { return _requireCache()[STORAGE_KEYS.hiddenDeals]; }
+  function getExcludeWords()        { return _requireCache()[STORAGE_KEYS.excludeWords]; }
+  function getExcludeMerchants()    { return _requireCache()[STORAGE_KEYS.excludeMerchantsData]; }
+  function getBlockedUsers()        { return _requireCache()[STORAGE_KEYS.blockedUsers]; }
+  function getWhitelistWords()      { return _requireCache()[STORAGE_KEYS.whitelistWords]; }
+  function getHideColdDeals()       { return _requireCache()[STORAGE_KEYS.hideColdDeals]; }
+  function getMaxPrice()            { return _requireCache()[STORAGE_KEYS.maxPrice]; }
+  function getMinDiscount()         { return _requireCache()[STORAGE_KEYS.minDiscount]; }
+  function getHideOwnColdVotes()    { return _requireCache()[STORAGE_KEYS.hideOwnColdVotes]; }
+  function getHideMerchantNames()   { return _requireCache()[STORAGE_KEYS.hideMatchingMerchantNames]; }
+  function getDebugEnabled()        { return _requireCache()[STORAGE_KEYS.debugEnabled]; }
+  function getTierEnabled()         { return _requireCache()[STORAGE_KEYS.tierEnabled]; }
+  function getTierAMax()            { return _requireCache()[STORAGE_KEYS.tierAMax]; }
+  function getTierBMax()            { return _requireCache()[STORAGE_KEYS.tierBMax]; }
 
   // ── Mutators (persist to storage + update cache) ─────────────────────────
 
   async function hideDeals(dealId) {
     const map = { ..._cache[STORAGE_KEYS.hiddenDeals], [dealId]: true };
     _cache[STORAGE_KEYS.hiddenDeals] = map;
-    await chrome.storage.local.set({ [STORAGE_KEYS.hiddenDeals]: map });
+    await StorageApi.set(STORAGE_KEYS.hiddenDeals, map);
   }
 
   async function unhideDeal(dealId) {
     const map = { ..._cache[STORAGE_KEYS.hiddenDeals] };
     delete map[dealId];
     _cache[STORAGE_KEYS.hiddenDeals] = map;
-    await chrome.storage.local.set({ [STORAGE_KEYS.hiddenDeals]: map });
+    await StorageApi.set(STORAGE_KEYS.hiddenDeals, map);
   }
 
   async function setExcludeWords(words) {
     _cache[STORAGE_KEYS.excludeWords] = words;
-    await chrome.storage.local.set({ [STORAGE_KEYS.excludeWords]: words });
+    await StorageApi.set(STORAGE_KEYS.excludeWords, words);
   }
 
   async function setExcludeMerchants(merchantsObj) {
     _cache[STORAGE_KEYS.excludeMerchantsData] = merchantsObj;
-    await chrome.storage.local.set({ [STORAGE_KEYS.excludeMerchantsData]: merchantsObj });
+    await StorageApi.set(STORAGE_KEYS.excludeMerchantsData, merchantsObj);
   }
 
   async function addExcludeMerchant(id, name) {
     const map = { ..._cache[STORAGE_KEYS.excludeMerchantsData], [id]: { id, name } };
     _cache[STORAGE_KEYS.excludeMerchantsData] = map;
-    await chrome.storage.local.set({ [STORAGE_KEYS.excludeMerchantsData]: map });
+    await StorageApi.set(STORAGE_KEYS.excludeMerchantsData, map);
   }
 
   async function removeExcludeMerchant(id) {
     const map = { ..._cache[STORAGE_KEYS.excludeMerchantsData] };
     delete map[id];
     _cache[STORAGE_KEYS.excludeMerchantsData] = map;
-    await chrome.storage.local.set({ [STORAGE_KEYS.excludeMerchantsData]: map });
+    await StorageApi.set(STORAGE_KEYS.excludeMerchantsData, map);
   }
 
   async function setBlockedUsers(users) {
     _cache[STORAGE_KEYS.blockedUsers] = users;
-    await chrome.storage.local.set({ [STORAGE_KEYS.blockedUsers]: users });
+    await StorageApi.set(STORAGE_KEYS.blockedUsers, users);
   }
 
   async function setWhitelistWords(words) {
     _cache[STORAGE_KEYS.whitelistWords] = words;
-    await chrome.storage.local.set({ [STORAGE_KEYS.whitelistWords]: words });
+    await StorageApi.set(STORAGE_KEYS.whitelistWords, words);
   }
 
   async function setHideColdDeals(val) {
     _cache[STORAGE_KEYS.hideColdDeals] = val;
-    await chrome.storage.local.set({ [STORAGE_KEYS.hideColdDeals]: val });
+    await StorageApi.set(STORAGE_KEYS.hideColdDeals, val);
   }
 
   async function setMaxPrice(val) {
     _cache[STORAGE_KEYS.maxPrice] = val;
-    await chrome.storage.local.set({ [STORAGE_KEYS.maxPrice]: val });
+    await StorageApi.set(STORAGE_KEYS.maxPrice, val);
   }
 
   async function setMinDiscount(val) {
     _cache[STORAGE_KEYS.minDiscount] = val;
-    await chrome.storage.local.set({ [STORAGE_KEYS.minDiscount]: val });
+    await StorageApi.set(STORAGE_KEYS.minDiscount, val);
   }
 
   async function setHideOwnColdVotes(val) {
     _cache[STORAGE_KEYS.hideOwnColdVotes] = val;
-    await chrome.storage.local.set({ [STORAGE_KEYS.hideOwnColdVotes]: val });
+    await StorageApi.set(STORAGE_KEYS.hideOwnColdVotes, val);
   }
 
   async function setHideMerchantNames(val) {
     _cache[STORAGE_KEYS.hideMatchingMerchantNames] = val;
-    await chrome.storage.local.set({ [STORAGE_KEYS.hideMatchingMerchantNames]: val });
+    await StorageApi.set(STORAGE_KEYS.hideMatchingMerchantNames, val);
+  }
+
+  async function setHideNsfw(val) {
+    _cache[STORAGE_KEYS.hideNsfw] = val;
+    await StorageApi.set(STORAGE_KEYS.hideNsfw, val);
+  }
+
+  async function setStripMerchantTitle(val) {
+    _cache[STORAGE_KEYS.stripMerchantTitle] = val;
+    await StorageApi.set(STORAGE_KEYS.stripMerchantTitle, val);
+  }
+
+  async function setRememberSort(val) {
+    _cache[STORAGE_KEYS.rememberSort] = val;
+    await StorageApi.set(STORAGE_KEYS.rememberSort, val);
+  }
+
+  /**
+   * Sortier-Gedächtnis: Key "<pathname>|<selectName>" → gewählter Wert.
+   * Wird von features/sort-memory.js geschrieben und beim Seitenbesuch gelesen.
+   */
+  async function setLastSort(key, value) {
+    const map = { ..._cache[STORAGE_KEYS.lastSortState], [key]: value };
+    _cache[STORAGE_KEYS.lastSortState] = map;
+    await StorageApi.set(STORAGE_KEYS.lastSortState, map);
   }
 
   async function setDebugEnabled(val) {
     _cache[STORAGE_KEYS.debugEnabled] = val;
-    await chrome.storage.local.set({ [STORAGE_KEYS.debugEnabled]: val });
+    await StorageApi.set(STORAGE_KEYS.debugEnabled, val);
   }
 
   async function setTierEnabled(val) {
     _cache[STORAGE_KEYS.tierEnabled] = val;
-    await chrome.storage.local.set({ [STORAGE_KEYS.tierEnabled]: val });
+    await StorageApi.set(STORAGE_KEYS.tierEnabled, val);
   }
 
   async function setTierAMax(val) {
     _cache[STORAGE_KEYS.tierAMax] = val;
-    await chrome.storage.local.set({ [STORAGE_KEYS.tierAMax]: val });
+    await StorageApi.set(STORAGE_KEYS.tierAMax, val);
   }
 
   async function setTierBMax(val) {
     _cache[STORAGE_KEYS.tierBMax] = val;
-    await chrome.storage.local.set({ [STORAGE_KEYS.tierBMax]: val });
+    await StorageApi.set(STORAGE_KEYS.tierBMax, val);
   }
 
-  /** Wipe all settings back to defaults. */
+  /**
+   * Wipe alle SETTINGS auf Defaults.
+   *
+   * Bewusst NICHT zurückgesetzt (Nutzer-Daten, identisch zum Popup-Verhalten):
+   *   - hiddenDeals   — manuell ausgeblendete Deals des Users
+   *   - schemaVersion — bleibt stehen, damit keine Re-Migration läuft
+   */
   async function reset() {
-    _cache = { ...DEFAULTS };
-    await chrome.storage.local.set(DEFAULTS);
+    const keep = {};
+    for (const def of MdmSchema.ENTRIES) {
+      if (def.resetKeep && _cache?.[def.key] !== undefined) keep[def.key] = _cache[def.key];
+    }
+    _cache = { ...DEFAULTS, ...keep };
+    await StorageApi.setMany(_cache);
   }
 
   /** Export all settings as a plain JSON-serialisable object. */
@@ -238,7 +243,7 @@ const SettingsStore = (() => {
   async function importAll(data) {
     const merged = { ...DEFAULTS, ...data };
     _cache = merged;
-    await chrome.storage.local.set(merged);
+    await StorageApi.setMany(merged);
   }
 
   return {

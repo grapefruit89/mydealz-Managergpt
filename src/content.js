@@ -64,6 +64,7 @@ const MyDealzManagerApp = (() => {
     // -- Optionale Features - abstuerzen erlaubt ---------------------------------
     if (typeof Exporter  !== 'undefined') safeInit('Exporter',  () => Exporter.init());
     if (typeof Collector !== 'undefined') safeInit('Collector', () => Collector.init());
+    if (typeof PermalinkTools !== 'undefined') safeInit('PermalinkTools', () => PermalinkTools.init());
 
     // -- Core - muss funktionieren -----------------------------------------------
     UiController.init({
@@ -75,6 +76,7 @@ const MyDealzManagerApp = (() => {
     window.__mdm_app = { reprocess };
 
     processDeals();
+    SortMemory.update(SettingsStore.settings);
     _startObserver();
   }
 
@@ -138,6 +140,7 @@ const MyDealzManagerApp = (() => {
 
     UiController.setHidden(el, hide);
     UiController.setGhost(el, !hide && !!ghost);
+    UiController.stripMerchant(el, deal, settings);
 
     if (debug) {
       UiController.setDebugBadge(el, hide ? reason : ghost ? reason : null);
@@ -152,6 +155,11 @@ const MyDealzManagerApp = (() => {
   function reprocess() {
     DealParser.resetStateCache();
     processDeals();
+    try {
+      SortMemory.update(SettingsStore.settings);
+    } catch (e) {
+      Logger.error('SortMemory', 'update nach reprocess fehlgeschlagen', e);
+    }
   }
 
   /** X-Button Handler: Deal persistieren + sofort ausblenden. */

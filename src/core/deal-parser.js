@@ -10,7 +10,10 @@
  *   3. cept-* / js-* classes   — semantic classes, moderately stable
  *   4. structural CSS classes   — design classes, breaks on redesigns
  *
- * Returned DealData shape: see BLUEPRINT.md §2
+ * GraphQL data (comments, thread lists, search) is handled by graphql-client.js —
+ * this parser stays synchronous and network-free.
+ *
+ * Returned DealData shape: see docs/BLUEPRINT.md §2
  */
 
 // ── Confirmed selectors (from live HTML, July 2026) ───────────────────────────
@@ -90,6 +93,12 @@ const SEL = {
   // Flags
   expired: '.thread--expired',
   voucher: '.thread--voucher',
+
+  // NSFW-Zensur-Overlay (gegraute Deal-Bilder). Quelle: Community-Sammlung
+  // „Mydealz auch ohne App nutzen" (mydealz-Diskussion 2035404, Kommentar
+  // 46038487). Live-Check /deals 2026-09-11: Selektor syntaktisch gültig,
+  // 0 Treffer solange keine NSFW-Deals im Viewport (negativ nicht beweisbar).
+  nsfw: 'span.text--color-white.height--all-full.width--all-12',
 };
 
 // ── __INITIAL_STATE__ cache ───────────────────────────────────────────────────
@@ -109,22 +118,12 @@ function _threadFromState(dealId) {
   const s = _getInitialState();
   if (!s || !dealId) return null;
 
-  // Probe all known paths
-  const candidates = [
-    s?.thread,
-    s?.threads?.[dealId],
-    s?.dealList?.threads?.[dealId],
-    s?.listing?.threads?.[dealId],
-    s?.search?.threads?.[dealId],
-  ];
-  for (const t of candidates) {
-    if (t && String(t.threadId ?? t.id) === String(dealId)) return t;
-  }
-
-  // Linear scan fallback
-  for (const map of [s?.threads, s?.dealList?.threads, s?.listing?.threads, s?.search?.threads]) {
-    if (map?.[dealId]) return map[dealId];
-  }
+  // Verifiziert (2026-09-11, live): Thread-Daten liegen NUR in s.threadDetail
+  // (Detailseiten). Listing-States enthalten KEINE Thread-Objekte (live gescannt:
+  // /deals + /new, auch keine JSON-Scripts/data-vue3 im Initial-HTML) — dort
+  // liefert dieser Guard null und parse() fällt auf den DOM-Pfad.
+  const t = s.threadDetail;
+  if (t && String(t.threadId ?? t.id) === String(dealId)) return t;
   return null;
 }
 
@@ -207,9 +206,10 @@ const DealParser = {
   /**
    * Parse a single deal article element.
    * Returns synchronously (prefers __INITIAL_STATE__ → DOM).
-   * For async GQL enrichment, call parseAsync() instead.
+   * For structured data beyond DOM/State (comments, thread lists), use
+   * GraphQLClient directly — the parser stays synchronous and network-free.
    * @param {HTMLElement} el
-   * @returns {Object} DealData (see BLUEPRINT.md §2)
+   * @returns {Object} DealData (see docs/BLUEPRINT.md §2)
    */
   parse(el) {
     const dealId = _dealId(el);
@@ -219,33 +219,6 @@ const DealParser = {
     if (state) return _fromState(state, el, dealId);
 
     // 2. Fallback: DOM selectors
-    return _fromDom(el, dealId);
-  },
-
-  /**
-   * Async version: tries __INITIAL_STATE__ → GraphQL → DOM.
-   * Use this when high data accuracy is needed (e.g. for filter evaluation on
-   * pages where __INITIAL_STATE__ is incomplete, like dynamically-loaded cards).
-   *
-   * @param {HTMLElement} el
-   * @returns {Promise<Object>} DealData
-   */
-  async parseAsync(el) {
-    const dealId = _dealId(el);
-
-    // 1. __INITIAL_STATE__
-    const state = _threadFromState(dealId);
-    if (state) return _fromState(state, el, dealId);
-
-    // 2. GraphQL — primary structured data source (query name best-guess)
-    if (dealId && typeof GraphQLClient !== 'undefined') {
-      try {
-        const gqlThread = await GraphQLClient.fetchThread(dealId);
-        if (gqlThread) return _fromGQL(gqlThread, el, dealId);
-      } catch { /* fall through */ }
-    }
-
-    // 3. DOM selectors — last resort
     return _fromDom(el, dealId);
   },
 
@@ -263,6 +236,7 @@ const DealParser = {
 };
 
 // ── Extract from __INITIAL_STATE__ ───────────────────────────────────────────
+// State alone lacks discount/vote fields → enriched from DOM (same as _fromDom).
 
 function _fromState(t, el, dealId) {
   const id          = dealId ?? String(t.threadId ?? t.id ?? '');
@@ -283,6 +257,11 @@ function _fromState(t, el, dealId) {
   const titleEl = el.querySelector(SEL.titleLink) ?? el.querySelector(SEL.titleAlt);
   const href    = titleEl?.href ?? '';
 
+  // DOM enrichment for fields the state doesn't carry:
+  const discountEl  = _first(el, ...SEL.discountSelectors);
+  const discountPct = _discountPct(discountEl);
+  const userVote    = _userVote(el);
+
   return {
     id,
     href,
@@ -291,11 +270,14 @@ function _fromState(t, el, dealId) {
     description:  el.querySelector(SEL.description)?.textContent?.trim() ?? '',
     price:        isNaN(price) ? null : price,
     priceOrig:    (!isNaN(priceOrigState) && priceOrigState != null) ? priceOrigState : null,
-    discount:     null,
+    discount:     discountEl?.textContent?.trim() || null,
+    discountPct,          // signed integer: -58 = 58% saving
     shipping:     null,
     temperature:  isNaN(temperature) ? null : temperature,
     isHot:        temperature != null && temperature > 0,
+    isWarm:       !!el.querySelector(SEL.isWarm),
     isCold:       temperature != null && temperature < 0,
+    userVote,             // 'hot' | 'cold' | null
     merchantId,
     merchantName,
     username,
@@ -306,70 +288,10 @@ function _fromState(t, el, dealId) {
     commentCount: _comments(el),
     isExpired,
     isVoucher,
+    isNsfw:       !!el.querySelector(SEL.nsfw),
     statusText:   el.querySelector(SEL.statusChip)?.textContent?.trim() ?? '',
     element: el,
     _source: 'state',
-  };
-}
-
-// ── Extract from GraphQL response ────────────────────────────────────────────
-// Maps the thread object returned by GraphQLClient.fetchThread() to DealData.
-// Field names are best-guesses from the pepper platform schema — update if GQL
-// returns different names (log the raw response to console with debugEnabled).
-
-function _fromGQL(t, el, dealId) {
-  const id          = dealId ?? String(t.threadId ?? t.id ?? '');
-  const merchantId  = String(t.merchant?.merchantId ?? '');
-  const merchantName= t.merchant?.merchantName ?? '';
-  const username    = t.user?.username ?? '';
-  const userId      = String(t.user?.userId ?? '');
-  const priceRaw    = t.price;
-  const price       = priceRaw != null ? parseFloat(priceRaw) : null;
-  const temperature = t.temperature != null ? parseFloat(t.temperature) : null;
-  const isExpired   = !!(t.status === 'expired' || t.isExpired);
-  const isVoucher   = !!(t.threadType === 'voucher');
-
-  // DOM still used for fields GQL doesn't expose:
-  const titleEl     = el.querySelector(SEL.titleLink) ?? el.querySelector(SEL.titleAlt);
-  const href        = titleEl?.href ?? '';
-  const discountEl  = _first(el, ...SEL.discountSelectors);
-  const discountPct = _discountPct(discountEl);
-  const userVote    = _userVote(el);
-
-  // Image URL from GQL mainImage or DOM fallback
-  const imageUrl = t.mainImage?.path
-    ? `https://static.mydealz.de${t.mainImage.path}`
-    : (el.querySelector(SEL.image)?.src ?? '');
-
-  return {
-    id,
-    href,
-    externalHref: el.querySelector(SEL.dealLink)?.href ?? '',
-    title:        t.title ?? titleEl?.title ?? '',
-    description:  el.querySelector(SEL.description)?.textContent?.trim() ?? '',
-    price:        isNaN(price) ? null : price,
-    priceOrig:    null,  // not in GQL thread query
-    discount:     discountEl?.textContent?.trim() ?? null,
-    discountPct,
-    shipping:     null,  // not in GQL thread query
-    temperature:  isNaN(temperature) ? null : temperature,
-    isHot:        temperature != null && temperature > 0,
-    isWarm:       false, // can't determine without DOM class
-    isCold:       temperature != null && temperature < 0,
-    userVote,
-    merchantId,
-    merchantName,
-    username,
-    userId,
-    userAvatarUrl:t.user?.imageUrls?.['60x60'] ?? '',
-    imageUrl,
-    imageAlt:     el.querySelector(SEL.image)?.alt ?? t.title ?? '',
-    commentCount: t.commentCount ?? _comments(el),
-    isExpired,
-    isVoucher,
-    statusText:   el.querySelector(SEL.statusChip)?.textContent?.trim() ?? '',
-    element: el,
-    _source: 'graphql',
   };
 }
 
@@ -378,7 +300,10 @@ function _fromGQL(t, el, dealId) {
 function _fromDom(el, dealId) {
   // Title
   const titleEl  = _first(el, SEL.titleLink, SEL.titleAlt);
-  const title    = titleEl?.title || titleEl?.textContent?.trim() ?? '';
+  // Prefer mdmOrigTitle (deal-filter-ui stripMerchant cache) — Filter-Matching
+  // muss gegen den UNANGETASTETEN Titel laufen, sonst verschiebt sich das
+  // Match-Verhalten nach dem Strippen.
+  const title    = el.dataset.mdmOrigTitle || titleEl?.title || (titleEl?.textContent?.trim() ?? '');
   const href     = titleEl?.href ?? '';
   const id       = dealId ?? _idFromHref(href);
 
@@ -450,6 +375,7 @@ function _fromDom(el, dealId) {
     commentCount: _comments(el),
     isExpired:    el.classList.contains('thread--expired') || !!el.querySelector(SEL.expired),
     isVoucher:    el.classList.contains('thread--voucher'),
+    isNsfw:       !!el.querySelector(SEL.nsfw),
     statusText:   el.querySelector(SEL.statusChip)?.textContent?.trim() ?? '',
     element: el,
     _source: 'dom',

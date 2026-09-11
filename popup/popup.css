@@ -1,0 +1,185 @@
+/* popup.css — Toolbar-Popup der mydealz-Manager-Extension.
+ * Muster (aus DIN-BriefNEO ADR-CSS übernommen): @layer-Kaskade, OKLCH-Farbraum,
+ * natives light-dark() Theming (keine JS-Darkmode-Klassen), Popover-API-Toast
+ * mit @starting-style + transition-behavior: allow-discrete.
+ */
+
+@layer reset, tokens, layout;
+
+@layer reset {
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    color-scheme: light dark;         /* Popup folgt dem Browser-Theme nativ */
+    accent-color: var(--c-accent);
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  }
+}
+
+@layer tokens {
+  :root {
+    --c-accent:  oklch(0.58 0.21 25);            /* mydealz-Rot, wahrnehmungsgerecht */
+    --c-accent-dim: color-mix(in oklch, var(--c-accent) 15%, transparent);
+    --c-bg:      light-dark(oklch(100% 0 0), oklch(0.21 0.01 254));
+    --c-surface: light-dark(oklch(0.98 0 0), oklch(0.26 0.012 254));
+    --c-surface-2: light-dark(oklch(0.965 0 0), oklch(0.31 0.012 254));
+    --c-text:    light-dark(oklch(0.22 0.01 254), oklch(0.93 0.005 254));
+    --c-muted:   light-dark(oklch(0.55 0.01 254), oklch(0.68 0.01 254));
+    --c-border:  light-dark(oklch(0.90 0 0), oklch(0.38 0.012 254));
+    --c-success: oklch(0.70 0.17 150);
+    --radius: 6px;
+  }
+}
+
+@layer layout {
+  body {
+    font-size: 13px;
+    color: var(--c-text);
+    background: var(--c-bg);
+    width: 340px;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    background: var(--c-accent);
+    color: oklch(100% 0 0);
+  }
+
+  header h1 { font-size: 15px; font-weight: 700; }
+  header .version { margin-left: auto; font-size: 11px; opacity: 0.75; }
+
+  .section {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--c-border);
+  }
+
+  label, .switch-row span {
+    display: block;
+    font-weight: 600;
+    font-size: 12px;
+    color: var(--c-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 5px;
+  }
+
+  input[type='text'],
+  input[type='number'] {
+    width: 100%;
+    border: 1px solid var(--c-border);
+    border-radius: var(--radius);
+    padding: 6px 8px;
+    font-size: 13px;
+    color: var(--c-text);
+    background: var(--c-surface);
+    outline: none;
+    transition: border-color 0.15s;
+    &:focus { border-color: var(--c-accent); }
+  }
+
+  /* ── Semantische Schalter (W3C <input switch>, Chrome 135+) ─────────────── */
+  .switch-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 7px;
+
+    span {
+      margin: 0;
+      text-transform: none;
+      font-weight: 400;
+      font-size: 13px;
+      color: var(--c-text);
+      cursor: pointer;
+      user-select: none;
+    }
+
+    input[type='checkbox'][switch] { cursor: pointer; }
+  }
+
+  /* ── Händler-Tags ────────────────────────────────────────────────────────── */
+  .tag-list { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
+
+  .tag {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--c-surface-2);
+    border: 1px solid var(--c-border);
+    border-radius: 12px;
+    padding: 2px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    &:hover { border-color: var(--c-accent); color: var(--c-accent); }
+  }
+
+  .tag .x { color: var(--c-accent); font-weight: 700; }
+
+  .no-merchants { color: var(--c-muted); font-size: 12px; margin-top: 4px; }
+
+  /* ── Stats ───────────────────────────────────────────────────────────────── */
+  .stat-row { display: flex; gap: 12px; margin-top: 2px; }
+
+  .stat {
+    flex: 1;
+    text-align: center;
+    background: var(--c-surface-2);
+    border-radius: var(--radius);
+    padding: 8px;
+  }
+
+  .stat .num { display: block; font-size: 20px; font-weight: 700; color: var(--c-accent); }
+  .stat .lbl { font-size: 11px; color: var(--c-muted); }
+
+  /* ── Footer-Buttons ──────────────────────────────────────────────────────── */
+  footer {
+    display: flex;
+    gap: 8px;
+    padding: 10px 16px;
+    border-top: 1px solid var(--c-border);
+  }
+
+  button {
+    border: none;
+    border-radius: var(--radius);
+    padding: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    color: var(--c-text);
+    background: var(--c-surface-2);
+    transition: opacity 0.15s;
+    &:hover { opacity: 0.85; }
+  }
+
+  .btn-primary { flex: 1; background: var(--c-accent); color: oklch(100% 0 0); }
+  .btn-small   { font-size: 11px; flex: 0 0 auto; padding: 8px 12px; }
+
+  /* ── Natives Popover-Toast (Top-Layer, kein JS-Toggling) ─────────────────── */
+  [popover] {
+    position: fixed;
+    inset: auto 0 8px;
+    width: fit-content;
+    margin-inline: auto;
+    border: none;
+    border-radius: 20px;
+    background: oklch(0.25 0.01 254 / 0.9);
+    color: oklch(100% 0 0);
+    padding: 8px 18px;
+    font-size: 12px;
+    color-scheme: inherit;
+
+    transition: opacity 0.25s, transform 0.25s, display 0.25s allow-discrete;
+    opacity: 1;
+
+    @starting-style { opacity: 0; }
+  }
+
+  [popover]:not(:popover-open) {
+    opacity: 0;
+    transition: opacity 0.25s, display 0.25s allow-discrete;
+  }
+}

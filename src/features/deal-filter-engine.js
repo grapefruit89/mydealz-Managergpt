@@ -11,7 +11,8 @@
  *   "+apple +iphone"  explizit AND (identisch zu "apple iphone")
  *   "-apple"          Deal wird NICHT ausgeblendet wenn apple vorkommt (Ausnahme)
  *   "apple -zubehör"  apple kommt vor UND zubehör kommt NICHT vor
- *   "*pro"            Wildcard: alles was mit "pro" endet (macpro, ipadpro)
+ *   "*pro"            Wildcard: alles was MIT "pro" ENDEN (macpro, ipadpro — nicht "Profi")
+ *   "pro*"            Wildcard: alles was mit "pro" BEGINNEN ("Profi" ja, "macpro" nein)
  *   "apple *zubehör*" apple (Wortgrenze) + beliebiger String mit "zubehör"
  *   '"passend für"'   Exakte Phrase (Anführungszeichen)
  *
@@ -52,15 +53,24 @@ const DealFilterEngine = (() => {
 
   /**
    * Prüft ob ein einzelnes Pattern im Text vorkommt.
-   * Wildcard (*) → Substring-Match (kein Word-Boundary).
+   * Wildcard-Glob-Semantik:
+   *   *foo  → Wort ENDET auf "foo"   (macpro, iPad Pro — nicht "Profi")
+   *   foo*  → Wort BEGINNT mit "foo" ("Profi" ja, "macpro" nein)
+   *   *foo* → enthält "foo"          (auch mitten im Wort)
    * Phrase (enthält Leerzeichen) → Substring-Match.
    * Sonst → Word-Boundary-Match.
    */
   function _matchesPattern(pattern, text) {
     if (pattern.includes('*')) {
-      // Glob-zu-Regex: * → .*
-      const regStr = _escapeRegex(pattern).replace(/\\\*/g, '[\\s\\S]*');
-      return new RegExp(regStr, 'i').test(text);
+      // Glob-zu-Regex: * → [\s\S]*
+      const base = _escapeRegex(pattern).replace(/\\\*/g, '[\\s\\S]*');
+      const lead  = pattern.startsWith('*');
+      const trail = pattern.endsWith('*');
+      if (lead && trail) return new RegExp(base, 'i').test(text);                      // *foo* = enthält
+      if (lead)          return new RegExp(base + `(?![${WORD_CHARS}])`, 'i').test(text); // *foo = endet auf
+      if (trail)         return new RegExp(`(?<![${WORD_CHARS}])` + base, 'i').test(text); // foo* = beginnt mit
+      // Sterne nur mittig (app*le): wie *foo* behandeln
+      return new RegExp(base, 'i').test(text);
     }
     if (pattern.includes(' ')) {
       // Exakte Phrase (Leerzeichen im Term → Substring)
@@ -113,6 +123,18 @@ const DealFilterEngine = (() => {
   const hidden  = (reason) => ({ hide: true,  ghost: false, tier: null, reason });
   const visible = (tier, reason = '') => ({ hide: false, ghost: false, tier, reason });
   const ghosted = (reason) => ({ hide: false, ghost: true,  tier: 'B', reason });
+
+  // ── Cent-Integer-Arithmetik ───────────────────────────────────────────────
+  //
+  // Preisvergleiche laufen IMMER in Cent-Integern, nie in Euro-Floats:
+  //   0.1 + 0.2 !== 0.3, und parseFloat("16,66") → 16.659999... — solche
+  //   Floats schlagen bei direktem Vergleich fehl ("19.99 > Max 19.99").
+  // Math.round(v * 100) macht den Vergleich exakt; negative Werte sind
+  // zwar keine realen Preise, werden aber korrekt gerundet (Safety).
+
+  function _cents(euro) {
+    return Math.round(euro * 100);
+  }
 
   // ── Haupt-Evaluierung ─────────────────────────────────────────────────────
 
@@ -169,21 +191,24 @@ const DealFilterEngine = (() => {
       return hidden(`Händler gesperrt: ${deal.merchantId}`);
     }
 
-    // 6. Gesperrte Händler (nach Name, fuzzy im Titel/Beschreibung)
+    // 6. Gesperrte Händler (nach Name, fuzzy im Händler-Feld UND Titel)
+    //    (Checkbox-Versprechen: "Händlernamen auch im Titel prüfen")
     if (settings.mdm_hideMatchingMerchantNames) {
       const merchantNameLower = (deal.merchantName ?? '').toLowerCase();
+      const titleLowerMerchant = titleLower; // Deal-Titel (bereits lowercased)
       for (const [, m] of Object.entries(excludedMerchants)) {
         if (!m.name) continue;
-        if (merchantNameLower.includes(m.name.toLowerCase())) {
+        const nameLower = m.name.toLowerCase();
+        if (merchantNameLower.includes(nameLower) || titleLowerMerchant.includes(nameLower)) {
           return hidden(`Händlername gesperrt: "${m.name}"`);
         }
       }
     }
 
-    // 7. Maximaler Preis
+    // 7. Maximaler Preis (Cent-Integer-Vergleich)
     const maxPrice = settings.mdm_maxPrice;
     if (maxPrice != null && deal.price != null) {
-      if (deal.price > maxPrice) return hidden(`${deal.price}€ > Max ${maxPrice}€`);
+      if (_cents(deal.price) > _cents(maxPrice)) return hidden(`${deal.price}€ > Max ${maxPrice}€`);
     }
 
     // 8. Kalte Deals ausblenden
@@ -196,7 +221,14 @@ const DealFilterEngine = (() => {
       return hidden('Selbst cold-gevotet');
     }
 
-    // 10. Mindest-Rabatt in %
+    // 10. NSFW-gegraute Deals ausblenden
+    //     Quelle: Community-Sammlung Thread 2035404, Kommentar 46038487
+    //     (uBlock-Lösung dort; hier als sauberes Setting im Deal-Parser)
+    if (settings.mdm_hideNsfw && deal.isNsfw) {
+      return hidden('NSFW (Bilder ausgegraut)');
+    }
+
+    // 11. Mindest-Rabatt in %
     const minDiscount = settings.mdm_minDiscount;
     if (minDiscount != null && minDiscount > 0) {
       if (deal.discountPct == null) {
@@ -208,16 +240,18 @@ const DealFilterEngine = (() => {
       }
     }
 
-    // 11. Preis-Tier-System (läuft nach allen anderen Filtern)
+    // 12. Preis-Tier-System (läuft nach allen anderen Filtern, Cent-Integer-Vergleich)
     //     Kein Preis → Tier A (sichtbar lassen)
     if (settings.mdm_tierEnabled && deal.price != null) {
-      const aMax = settings.mdm_tierAMax ?? 100;
-      const bMax = settings.mdm_tierBMax ?? 600;
-      const p    = deal.price;
+      const aMax = _cents(settings.mdm_tierAMax ?? 100);
+      const bMax = _cents(settings.mdm_tierBMax ?? 600);
+      const p    = _cents(deal.price);
+      const aEuro = settings.mdm_tierAMax ?? 100;
+      const bEuro = settings.mdm_tierBMax ?? 600;
 
-      if (p <= aMax)      return visible('A', `Tier A (≤${aMax}€)`);
-      else if (p <= bMax) return ghosted(`Tier B (${aMax}–${bMax}€, aktuell ${p}€)`);
-      else                return hidden(`Tier C (>${bMax}€, aktuell ${p}€)`);
+      if (p <= aMax)      return visible('A', `Tier A (≤${aEuro}€)`);
+      else if (p <= bMax) return ghosted(`Tier B (${aEuro}–${bEuro}€, aktuell ${deal.price}€)`);
+      else                return hidden(`Tier C (>${bEuro}€, aktuell ${deal.price}€)`);
     }
 
     return visible(null);

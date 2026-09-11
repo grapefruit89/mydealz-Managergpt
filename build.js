@@ -22,15 +22,18 @@ const MODULE_ORDER = [
   // ── Core: Infrastruktur ─────────────────────────────────────────────────────
   'core/logger.js',             // Logging (muss zuerst laden)
   'core/storage.js',            // chrome.storage Wrapper
+  'core/settings-schema.js',    // SSOT: Keys/Defaults/UI-Zugehörigkeit (VOR settings-store)
   'core/settings-store.js',     // Einstellungen lesen/schreiben
   'core/deal-parser.js',        // DOM → Deal-Objekt
   'core/graphql-client.js',     // GQL-Fetch mit Retry/429
   'core/settings-modal.js',     // Settings-Modal (CSS + öffnen/speichern)
   // ── Features ────────────────────────────────────────────────────────────────
-  'features/deal-filter/filter-engine.js', // Filter-Logik (pure, kein DOM)
-  'features/deal-filter/deal-ui.js',       // CSS-Vars + ✕/⚙ Buttons + Ghost/Hidden
-  'features/ai-export/exporter.js',        // KI-Export (Detail-Seiten)
-  'features/collector/collector.js',       // Deal Collector (Listing-Seiten)
+  'features/deal-filter-engine.js',   // Filter-Logik (pure, kein DOM)
+  'features/deal-filter-ui.js',       // CSS-Vars + ✕/⚙ Buttons + Ghost/Hidden
+  'features/exporter.js',                     // KI-Export (Detail-Seiten)
+  'features/collector.js',                  // Deal Collector (Listing-Seiten)
+  'features/sort-memory.js',                // Sortierpräferenz merken (opt-in)
+  'features/permalink-tools.js',            // Permalink-Übersetzer (Popup → Tab)
   // ── Entry point ─────────────────────────────────────────────────────────────
   'content.js',
 ];
@@ -122,8 +125,9 @@ function buildContentScript() {
 }
 
 function buildUserscript() {
-  // For the userscript, skip core/storage.js (replaced by shim)
-  const userscriptModules = MODULE_ORDER.filter(m => m !== 'core/storage.js');
+  // storage.js IS included: the GM shim below provides chrome.storage.local,
+  // StorageApi (settings-store dependency) wraps it. Order: shim → storage.js → rest.
+  const userscriptModules = MODULE_ORDER.slice();
   const parts = userscriptModules.map(readModule);
   const wrapper = `(function() {\n'use strict';\n${USERSCRIPT_STORAGE_SHIM}\n${parts.join('\n')}\n})();\n`;
 
@@ -139,12 +143,21 @@ function buildCSS() {
   console.log('✔  dist/content.css');
 }
 
+// Shared bundle für Extension-Seiten (popup.html): nur das Settings-Schema,
+// damit popup.js dieselben KEYS/DEFAULTS nutzt wie der Content-Script-Bundle.
+function buildPopupShared() {
+  const code = readModule('core/settings-schema.js');
+  fs.writeFileSync(path.join(DIST, 'settings-schema.js'), code, 'utf8');
+  console.log('✔  dist/settings-schema.js (Popup-Shared)');
+}
+
 // ── Run ───────────────────────────────────────────────────────────────────────
 
 if (!fs.existsSync(DIST)) fs.mkdirSync(DIST, { recursive: true });
 
 buildContentScript();
 buildUserscript();
+buildPopupShared();
 buildCSS();
 
 console.log('\nDone. Load dist/ as unpacked extension in Chrome.');

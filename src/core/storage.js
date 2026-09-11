@@ -24,6 +24,16 @@ const StorageApi = (() => {
   }
 
   /**
+   * Read a set of keys, filling missing entries with the provided defaults.
+   * Mirrors chrome.storage.local.get(defaultsObj) semantics.
+   * @param {Object} defaultsObj  – { [key]: defaultValue }
+   * @returns {Promise<Object>}
+   */
+  async function getWithDefaults(defaultsObj) {
+    return chrome.storage.local.get(defaultsObj);
+  }
+
+  /**
    * Write one key-value pair.
    * @param {string} key
    * @param {*} value
@@ -59,7 +69,7 @@ const StorageApi = (() => {
     return chrome.storage.local.clear();
   }
 
-  return { get, set, setMany, remove, clear };
+  return { get, getWithDefaults, set, setMany, remove, clear };
 })();
 
 // Make available as ES module export AND as plain global (for the bundled build)

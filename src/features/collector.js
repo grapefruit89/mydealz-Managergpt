@@ -5,16 +5,19 @@
  * Aktiviert auf: /search, /search/deals, /gruppe/*, /deals, /neu, /gutscheine
  * Exportiert:    Titel, Preis, °C, Händler, Datum, URL, Beschreibung
  *
- * ── Daten-Strategie ────────────────────────────────────────────────────────────
- *   1. window.__INITIAL_STATE__  → Seite 1 kostenlos, keine Requests nötig
- *   2. GraphQL POST              → Weitere Seiten per Pagination
- *   3. DOM CSS Selektoren        → Fallback (nur aktuelle Seitenansicht)
+ * ── Daten-Strategie (verifiziert live 2026-09-11, Muster MydealzExporter) ──────
+ *   1. Thread-IDs aus sichtbaren DOM-Artikeln (article[id^="thread_"])
+ *      — Listing-States tragen KEINE Thread-Daten (live gescannt /deals,
+ *        /new, /search: kein feeds/entities/search im __INITIAL_STATE__,
+ *        keine JSON-Scripts, kein data-vue3 im Initial-HTML)
+ *   2. Optional: max. 2 Folgeseiten via AJAX-Endpunkt
+ *      (?page=N&ajax=true&layout=horizontal → 276 data-vue3-Payloads, live ✓)
+ *   3. Vollständige Daten per GQL-Alias-Batch (thread(threadId: { eq }), live ✓)
+ *   4. Fallback ohne GQL: DOM-Parse (DealParser)
  *
- * ── Seiten-Typen ───────────────────────────────────────────────────────────────
- *   merchant:  /search/deals?merchant-id=15   → threads(filter: merchantId)
- *   search:    /search?q=apple                → search(query: "apple")
- *   group:     /gruppe/gaming                 → threads(filter: groupSlug)
- *   general:   /deals, /neu, /trending        → threads() unfiltered
+ *   Keine best-guess Pagination-Queries mehr: thread()/threads()/search()
+ *   Pagination-Formen waren unverifiziert; der AJAX-Endpunkt + Alias-Batch
+ *   ist live getestet (siehe /home/moritz/repos/MydealzExporter/data_insights.md).
  */
 
 const Collector = (() => {
@@ -69,53 +72,59 @@ const Collector = (() => {
   // ── Datenquellen ───────────────────────────────────────────────────────────
 
   /**
-   * Liest Deals aus window.__INITIAL_STATE__ (Seite 1 ist immer da).
-   * Gibt normalisierte Deal-Objekte zurück.
+   * Liest Deals aus window.__INITIAL_STATE__.
+   * Verifiziert (2026-09-11 live): Listing-States enthalten KEINE Thread-Daten —
+   * auf Detailseiten existiert nur `threadDetail` (ein Deal, nicht eine Liste).
+   * Der Collector läuft nur auf Listings → dieser Fallback liefert bewusst []
+   * und collect() fällt direkt auf den DOM-Pfad (_fromDom).
    */
   function _fromInitialState() {
-    try {
-      const state = window.__INITIAL_STATE__;
-      if (!state?.entities?.threads) return [];
-
-      // Feed IDs oder Search-Ergebnis-IDs aus dem State extrahieren
-      const threadIds =
-        state.feeds?.main?.ids ||           // Feed-Seiten (/deals, /neu)
-        state.search?.results?.ids ||       // Suchergebnisse
-        state.listing?.threads?.ids ||      // Listing-Seiten
-        Object.keys(state.entities.threads); // Fallback: alle threads
-
-      return threadIds
-        .map(id => state.entities.threads[id])
-        .filter(Boolean)
-        .map(_normalizeThread);
-    } catch (e) {
-      console.warn('[MDM Collector] __INITIAL_STATE__ parse failed:', e.message);
-      return [];
-    }
+    return [];
   }
 
   /**
-   * Normalisiert ein Thread-Objekt (aus GQL oder State) in ein einheitliches Format.
+   * Normalisiert ein Thread-Objekt (GQL-Batch ODER State) in ein einheitliches Format.
+   * Prinzip „one deal, one shape": alle Felder existieren, fehlende sind null.
    */
   function _normalizeThread(t) {
     if (!t) return null;
-    const id = t.threadId ?? t.id ?? '';
+    const id = String(t.threadId ?? t.id ?? '');
+    if (!id) return null;
     const slug = t.slug ?? '';
-    const urlPath = t.urlPath ?? (slug ? `/deals/${slug}` : '');
+    const url  = t.url
+      ?? (t.urlPath ? `${location.origin}${t.urlPath}` : '')
+      ?? '';
+
+    const price      = _parsePrice(t.price ?? null);
+    const origRaw    = t.originalPrice ?? t.nextBestPrice ?? null;
+    const priceOrig  = _parsePrice(origRaw);
+    // Rabatt % aus GQL-Feld oder aus Preis-Delta (Export-Muster)
+    let discountPct  = t.discountPct ?? null;
+    if (discountPct == null && priceOrig && price != null && priceOrig > price) {
+      discountPct = Math.round((priceOrig - price) / priceOrig * 100);
+    }
+
+    const rawDesc = t.description ?? t.preparedDescription ?? '';
+    const isHtml  = /<[a-z][\s\S]*>/i.test(rawDesc);
 
     return {
-      id:          String(id),
+      id,
       title:       t.title ?? '',
-      price:       _parsePrice(t.price ?? t.nextBestPrice ?? null),
-      originalPrice: _parsePrice(t.nextBestPrice ?? null),
+      price,
+      displayPrice: t.displayPrice ?? null,
+      originalPrice: priceOrig,
+      priceOff:    t.priceOff ?? null,
+      discountPct,
+      shippingFree: t.shippingFree ?? null,
       temperature: typeof t.temperature === 'number' ? t.temperature : null,
-      merchant:    t.merchant?.merchantName ?? t.merchantName ?? '',
+      merchant:    t.merchantName ?? t.merchant?.merchantName ?? '',
       merchantId:  String(t.merchant?.merchantId ?? t.merchantId ?? ''),
-      username:    t.user?.username ?? t.username ?? '',
-      publishedAt: t.publishedAt ?? t.createdAt ?? '',
+      username:    t.username ?? t.user?.username ?? '',
+      userId:      t.userId ?? t.user?.userId ?? '',
+      publishedAt: t.publishedAt ?? t.createdAt ?? '',  // unix-Sek ODER ISO — toMarkdown handhabt beides
       isExpired:   !!(t.isExpired ?? t.expired),
-      description: _stripHtml(t.description ?? t.preparedDescription ?? ''),
-      url:         urlPath ? `https://www.mydealz.de${urlPath}` : '',
+      description: isHtml ? _stripHtml(rawDesc) : (rawDesc ?? ''),
+      url,
       commentCount: t.commentCount ?? 0,
     };
   }
@@ -131,105 +140,90 @@ const Collector = (() => {
     return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   }
 
+  // ── ID-Sammlung (verifiziertes Muster aus MydealzExporter listing.js) ──────
+
+  // Bewusst knapp gedeckelt: max. 2 Extraseiten + Pause — kein Ban-Risiko.
+  const MAX_EXTRA_PAGES      = 2;
+  const EXTRA_PAGE_PAUSE_MS  = 700;
+
+  /** Thread-IDs aus sichtbaren DOM-Artikeln.
+   *  Verifiziert (2026-09-11 live): Listing-States (__INITIAL_STATE__ auf /deals,
+   *  /new, /search) enthalten KEINE Thread-Daten — IDs kommen ausschließlich
+   *  aus dem DOM + AJAX-Folgeseiten (data-vue3). */
+  function _getVisibleIds() {
+    return [...document.querySelectorAll('article[id^="thread_"]')]
+      .map(el => el.id.replace('thread_', ''))
+      .filter(id => /^\d+$/.test(id));
+  }
+
+  /** Thread-IDs aus dem State: gibt es auf Listings nicht (live verifiziert
+   *  2026-09-11) — die Funktion bleibt als Ehrlichkeits-Anker und liefert []. */
+  function _idsFromState() {
+    return [];
+  }
+
   /**
-   * Holt eine Seite Deals per GraphQL.
-   * Versucht je nach Kontext verschiedene Query-Varianten.
+   * Vue3-Thread-Payloads aus HTML parsen — nur die threadIds.
+   * mydealz bettet die Thread-Daten in data-vue3-Attributen ein
+   * (props.thread.threadId) — Initial-HTML wie AJAX-Antworten.
    */
-  async function _fetchGqlPage(context, page, limit) {
-    // Für Textsuche: search()-Query
-    if (context.type === 'search') {
-      return await _fetchSearchPage(context.query, page, limit);
+  function _parseVue3ThreadIds(html) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const out = [];
+    for (const el of doc.querySelectorAll('[data-vue3]')) {
+      try {
+        const data = JSON.parse(el.getAttribute('data-vue3'));
+        const t = data?.props?.thread;
+        if (t?.threadId && /^\d+$/.test(String(t.threadId))) out.push(String(t.threadId));
+      } catch { /* defektes Payload überspringen */ }
     }
-    // Für Händler/Gruppe/Allgemein: threads()-Query mit Filter
-    return await _fetchThreadsPage(context, page, limit);
+    return out;
   }
 
-  // GraphQL: threads(filter, limit, page) — für Händler, Gruppen, Feed
-  const Q_THREADS = `
-    query threads($filter: ThreadsFilter, $limit: Int, $page: Int) {
-      threads(filter: $filter, limit: $limit, page: $page) {
-        items {
-          threadId
-          title
-          price
-          temperature
-          status
-          isExpired
-          publishedAt
-          slug
-          urlPath
-          description
-          commentCount
-          merchant { merchantId merchantName }
-          user { username }
-        }
-        pagination { last total }
-      }
-    }
-  `;
+  /**
+   * Folgeseite via AJAX-Endpunkt: ?page=N&ajax=true&layout=horizontal
+   * liefert ein JSON-Objekt { data: { content: "<html>" } } (oder HTML direkt).
+   * Hier werden NUR IDs gesammelt — die Deals kommen aus dem GQL-Batch.
+   */
+  async function _fetchExtraPageIds(pageNum) {
+    const sp = new URLSearchParams(window.location.search);
+    sp.delete('ajax');
+    sp.delete('layout');
+    sp.set('page', String(pageNum));
+    sp.set('ajax', 'true');
+    sp.set('layout', 'horizontal');
 
-  // GraphQL: search(query, limit, page) — für Textsuche
-  const Q_SEARCH = `
-    query searchThreads($query: String!, $limit: Int, $page: Int) {
-      search(query: $query, limit: $limit, page: $page) {
-        items {
-          threadId
-          title
-          price
-          temperature
-          status
-          isExpired
-          publishedAt
-          slug
-          urlPath
-          description
-          commentCount
-          merchant { merchantId merchantName }
-          user { username }
-        }
-        pagination { last total }
-      }
-    }
-  `;
+    const res = await fetch(window.location.pathname + '?' + sp.toString(), {
+      headers: { 'x-requested-with': 'XMLHttpRequest' },
+    });
 
-  async function _fetchThreadsPage(context, page, limit) {
-    const filter = {};
-    if (context.type === 'merchant' && context.merchantId) {
-      filter.merchantId = { eq: context.merchantId };
+    const text = await res.text();
+    let html = text;
+    if (text.trimStart().startsWith('{')) {
+      try { html = JSON.parse(text)?.data?.content ?? ''; } catch { /* HTML-Fallback */ }
     }
-    if (context.type === 'group' && context.slug) {
-      filter.slug = { eq: context.slug };
-    }
-
-    try {
-      const result = await GraphQLClient.query(Q_THREADS, { filter, limit, page });
-      const data = result?.data?.threads;
-      if (!data) return null;
-      return {
-        items: (data.items ?? []).map(_normalizeThread).filter(Boolean),
-        lastPage: data.pagination?.last ?? page,
-        total: data.pagination?.total ?? null,
-      };
-    } catch (e) {
-      console.warn('[MDM Collector] threads GQL failed:', e.message);
-      return null;
-    }
+    return _parseVue3ThreadIds(html);
   }
 
-  async function _fetchSearchPage(searchQuery, page, limit) {
-    try {
-      const result = await GraphQLClient.query(Q_SEARCH, { query: searchQuery, limit, page });
-      const data = result?.data?.search;
-      if (!data) return null;
-      return {
-        items: (data.items ?? []).map(_normalizeThread).filter(Boolean),
-        lastPage: data.pagination?.last ?? page,
-        total: data.pagination?.total ?? null,
-      };
-    } catch (e) {
-      console.warn('[MDM Collector] search GQL failed:', e.message);
-      return null;
+  /**
+   * Alle sammelbaren IDs: State + sichtbare Seite + max. MAX_EXTRA_PAGES
+   * AJAX-Folgeseiten, dedupliziert, auf limit gekappt.
+   */
+  async function _collectAllIds(limit, onProgress) {
+    const all = [...new Set([..._idsFromState(), ..._getVisibleIds()])];
+    const sp = new URLSearchParams(window.location.search);
+    const pageFrom = parseInt(sp.get('page') || '1', 10) || 1;
+
+    for (let i = 1; i <= MAX_EXTRA_PAGES && all.length < limit; i++) {
+      onProgress?.(all.length, limit, `⏳ Seite ${pageFrom + i}…`);
+      const ids = await _fetchExtraPageIds(pageFrom + i);
+      if (!ids.length) break;                       // Ende der Liste
+      const before = all.length;
+      for (const id of ids) if (!all.includes(id)) all.push(id);
+      if (all.length === before) break;             // keine neuen IDs → fertig
+      if (i < MAX_EXTRA_PAGES) await new Promise(r => setTimeout(r, EXTRA_PAGE_PAUSE_MS));
     }
+    return all.slice(0, limit);
   }
 
   /**
@@ -261,63 +255,47 @@ const Collector = (() => {
   // ── Haupt-Collect-Funktion ─────────────────────────────────────────────────
 
   /**
-   * Sammelt Deals von der aktuellen Seite.
+   * Sammelt Deals von der aktuellen Seite (verifizierte Pipeline).
+   *
+   *   1. IDs: State + sichtbares DOM + max. 2 AJAX-Folgeseiten
+   *   2. Daten: GQL-Alias-Batch (verifizierte THREAD_FIELDS, volle Beschreibung)
+   *   3. Fallbacks: __INITIAL_STATE__-Objekte → DOM-Parse (DealParser)
+   *
    * @param {Object} opts
    * @param {number} opts.limit       – max. Deals (default 100)
-   * @param {Function} opts.onProgress – (loaded, total) callback
+   * @param {Function} opts.onProgress – (loaded, total, label) callback
    * @returns {Promise<{deals: Object[], context: Object, total: number}>}
    */
   async function collect({ limit = DEFAULT_LIMIT, onProgress } = {}) {
     const context = _getContext();
-    const deals = [];
-    let total = 0;
+    let deals = [];
 
-    // 1. Seite 1 aus __INITIAL_STATE__ (kostenlos)
-    const stateDeals = _fromInitialState();
-    if (stateDeals.length > 0) {
-      deals.push(...stateDeals.slice(0, limit));
-      total = stateDeals.length; // Schätzung
-      onProgress?.(deals.length, limit);
-    }
-
-    // 2. Wenn wir noch mehr brauchen und GQL verfügbar: weitere Seiten laden
-    if (deals.length < limit && typeof GraphQLClient !== 'undefined') {
-      const pageLimit = Math.min(limit, 100); // GQL max 100 per request
-      let page = deals.length > 0 ? 2 : 1;   // Seite 1 schon aus State?
-      let lastPage = 99;
-
-      // Seite 1 überspringen wenn wir schon State-Daten haben
-      if (deals.length === 0) {
-        const firstPage = await _fetchGqlPage(context, 1, pageLimit);
-        if (firstPage) {
-          deals.push(...firstPage.items.slice(0, limit - deals.length));
-          lastPage = firstPage.lastPage;
-          total = firstPage.total ?? deals.length;
-          onProgress?.(deals.length, Math.min(limit, total));
-          page = 2;
+    // 1. IDs sammeln und per verifiziertem GQL-Batch anreichern
+    if (typeof GraphQLClient !== 'undefined') {
+      try {
+        const ids = await _collectAllIds(limit, onProgress);
+        if (ids.length) {
+          const threads = await GraphQLClient.fetchThreadBatch(ids, {
+            onProgress: (done, total, label) => onProgress?.(done, total, label ?? '📋 Sammle Deals…'),
+          });
+          deals = threads.map(_normalizeThread).filter(Boolean);
         }
-      }
-
-      while (deals.length < limit && page <= lastPage) {
-        const batch = await _fetchGqlPage(context, page, pageLimit);
-        if (!batch || batch.items.length === 0) break;
-        deals.push(...batch.items.slice(0, limit - deals.length));
-        lastPage = batch.lastPage;
-        total = batch.total ?? total;
-        onProgress?.(deals.length, Math.min(limit, total));
-        page++;
+      } catch (e) {
+        console.warn('[MDM Collector] GQL-Batch failed:', e.message);
       }
     }
 
-    // 3. DOM-Fallback wenn weder State noch GQL Daten lieferten
+    // 2. Fallback-Quelle: __INITIAL_STATE__-Objekte (kein Netz)
     if (deals.length === 0) {
-      const domDeals = _fromDom();
-      deals.push(...domDeals);
-      total = domDeals.length;
-      onProgress?.(deals.length, deals.length);
+      deals = _fromInitialState().slice(0, limit);
     }
 
-    return { deals, context, total };
+    // 3. Letzter Fallback: DOM-Parse (DealParser, nur sichtbare Seite)
+    if (deals.length === 0) {
+      deals = _fromDom();
+    }
+
+    return { deals, context, total: deals.length };
   }
 
   // ── Markdown-Export ────────────────────────────────────────────────────────
@@ -382,17 +360,15 @@ const Collector = (() => {
 
   /**
    * Gibt true zurück wenn die aktuelle Seite eine Listing-Seite ist.
+   * DETEKTOR statt Pfad-Liste: die Listing-Pfade sind pro Land lokalisiert
+   * (mydealz /deals,/hot,/new · dealabs /bons-plans · pepper.pl /nowe ·
+   *  nl.pepper.com /nieuw · hotukdeals /deals,/hot,/new,/hottest) — live
+   * verifiziert 2026-09-11. Überall identisch: Threads im DOM. Detailseiten
+   * haben KEINE Artikel-Karten (verifiziert), daher articles>0 && kein threadDetail.
    */
   function _isListingPage() {
-    const path = location.pathname;
-    return (
-      path.startsWith('/search') ||
-      path.startsWith('/gruppe/') ||
-      path === '/deals' ||
-      path === '/neu' ||
-      path === '/trending' ||
-      path.startsWith('/gutscheine')
-    );
+    if (window.__INITIAL_STATE__?.threadDetail) return false;   // Detailseite
+    return document.querySelectorAll('article[id^="thread_"]').length > 0;
   }
 
   /**
@@ -437,8 +413,8 @@ const Collector = (() => {
     try {
       const { deals, context, total } = await collect({
         limit,
-        onProgress: (loaded, max) => {
-          overlay.textContent = `📋 ${loaded} von ${max} Deals geladen…`;
+        onProgress: (loaded, max, label) => {
+          overlay.textContent = label ?? `📋 ${loaded} von ${max} Deals geladen…`;
         },
       });
 
@@ -528,7 +504,7 @@ const Collector = (() => {
     if (countAnchor) {
       // ── Button 2: kompakter Inline-Button neben dem Deal-Count ──────────────
       btn.innerHTML = '📋 Exportieren';
-      btn.title = `Deals als Markdown exportieren (${DEFAULT_LIMIT} Deals · Shift+Klick = ${MAX_LIMIT})`;
+      btn.title = `Deals als Markdown exportieren (${DEFAULT_LIMIT} Deals · Shift+Klick = ${MAX_LIMIT} · max. ${MAX_EXTRA_PAGES} Folgeseiten via AJAX)`;
       btn.style.cssText = `
         display: inline-flex;
         align-items: center;
@@ -567,7 +543,7 @@ const Collector = (() => {
     } else {
       // ── Fallback: floating FAB bottom-right ─────────────────────────────────
       btn.innerHTML = '📋';
-      btn.title = `Deals exportieren (${DEFAULT_LIMIT} Deals · Shift+Klick = ${MAX_LIMIT})`;
+      btn.title = `Deals exportieren (${DEFAULT_LIMIT} Deals · Shift+Klick = ${MAX_LIMIT} · max. ${MAX_EXTRA_PAGES} Folgeseiten via AJAX)`;
       btn.style.cssText = `
         position: fixed;
         bottom: 24px;

@@ -149,7 +149,7 @@ mydealz-manager-ext/
 │
 ├── popup/
 │   ├── popup.html             # Extension-Toolbar-Popup
-│   └── popup.js               # Popup-Logik (liest/schreibt chrome.storage direkt)
+│   └── popup.js               # Popup-Logik (KEYS/DEFAULTS aus MdmSchema)
 │
 ├── icons/
 │   ├── icon16.png
@@ -157,42 +157,45 @@ mydealz-manager-ext/
 │   └── icon128.png
 │
 ├── dist/                      # Build-Output (nicht committet)
-│   ├── content.js             # Gebündeltes Content Script (~131 KB)
+│   ├── content.js             # Gebündeltes Content Script (~142 KB)
 │   ├── userscript.js          # Tampermonkey-Build (mit GM-Shim)
+│   ├── settings-schema.js     # Settings-Schema für popup.html (Shared-Bundle)
 │   └── content.css            # Minimales CSS (Styles leben in JS)
-│
+
 ├── src/
 │   │
 │   ├── content.js             # Entry Point: Bootstrap, Observer, processDeals()
+│   ├── _template.js           # Vorlage für neue Module (IIFE + module.exports Guard)
 │   │
 │   ├── core/                  # Infrastruktur — keine Feature-Logik
 │   │   ├── logger.js          # Logger mit _history, getHistory(), clearHistory()
-│   │   ├── storage.js         # chrome.storage.local Wrapper
+│   │   ├── storage.js         # chrome.storage.local Wrapper (StorageApi)
+│   │   ├── settings-schema.js # SSOT: Keys/Defaults/UI-Zugehörigkeit/Reset-Regeln
 │   │   ├── settings-store.js  # Settings-Cache, Getter/Setter, Schema-Migration
-│   │   ├── deal-parser.js     # DOM → DealData-Objekt (data-t Selektoren)
-│   │   ├── graphql-client.js  # GQL-Fetch mit Retry und 429-Handling
+│   │   ├── deal-parser.js     # DOM/State → DealData (synchron, netzfrei)
+│   │   ├── graphql-client.js  # Verifizierte GQL-Shapes + Retry + 200+HTML-Erkennung
 │   │   └── settings-modal.js  # Settings-Modal: CSS, HTML, Speichern, Error-Log
 │   │
-│   ├── features/              # Optionale Feature-Module (laufen durch safeInit)
-│   │   ├── deal-filter/
-│   │   │   ├── filter-engine.js   # Pure Filterbewertung: evaluate(deal, settings)
-│   │   │   └── deal-ui.js         # CSS-Vars, ✕/⚙-Buttons, ghost/hidden States
-│   │   │
-│   │   ├── ai-export/
-│   │   │   └── exporter.js        # Kommentar-Export als KI-Markdown (Detailseiten)
-│   │   │
-│   │   └── collector/
-│   │       └── collector.js       # Deal-Liste als Markdown exportieren (Listings)
-│   │
-│   ├── sandbox/               # Experimenteller Code — nie in MODULE_ORDER
-│   │   └── SANDBOX.md         # Spielregeln für Sandbox-Features
-│   │
-│   └── _template/
-│       └── MODULE_TEMPLATE.js # Vorlage für neue Module (IIFE + module.exports Guard)
-│
+│   └── features/              # Optionale Feature-Module (laufen durch safeInit)
+│       ├── deal-filter-engine.js  # Pure Filterbewertung: evaluate(deal, settings)
+│       ├── deal-filter-ui.js      # CSS-Vars, ✕/⚙-Buttons, ghost/hidden States
+│       ├── exporter.js            # Kommentar-Export als KI-Markdown (Detailseiten)
+│       └── collector.js           # Deal-Liste als Markdown exportieren (Listings)
+
 └── docs/
-    └── adr/
-        └── 001-build-system.md  # ADR: Warum build.js statt ES-Module
+    ├── BLUEPRINT.md           # Spec: Zielarchitektur + Datenmodell
+    ├── LEARNINGS.md           # Learnings + Sprint-Status (immer aktuell halten!)
+    ├── ARCHITECTURE_BRIEF.md  # Brief für externe Architektur-Reviews
+    ├── werkzeuge.md           # Pepper-Netzwerk-Status + Werkzeug-Links (Quelle: Original-Repo)
+    ├── ROADMAP.md             # Features + Ideen-Liste mit Quellen (SSOT)
+    ├── SANDBOX.md             # Konvention für Experimente
+    ├── error-handling-plan.md # Plan: safeInit/Error-Boundary
+    └── adr-001-build-system.md  # ADR: Warum build.js statt ES-Module
+
+tests/                          # Zero-Dep-Testsuite: node tests/run-tests.js
+├── run-tests.js
+├── harness.js
+└── *.test.js
 ```
 
 ---
@@ -204,14 +207,15 @@ mydealz-manager-ext/
 ```
 core/logger.js          → immer zuerst (alle Module nutzen Logger)
 core/storage.js         → chrome.storage Wrapper
+core/settings-schema.js → SSOT für Keys/Defaults (VOR settings-store)
 core/settings-store.js  → Settings laden, cachen, migrieren
 core/deal-parser.js     → DOM lesen
 core/graphql-client.js  → API-Zugriff
 core/settings-modal.js  → UI-Schicht für Settings
-features/deal-filter/filter-engine.js  → pure Filterlogik
-features/deal-filter/deal-ui.js        → Deal-Karten UI
-features/ai-export/exporter.js         → Detailseiten-Feature
-features/collector/collector.js        → Listing-Feature
+features/deal-filter-engine.js  → pure Filterlogik
+features/deal-filter-ui.js      → Deal-Karten UI
+features/exporter.js                   → Detailseiten-Feature
+features/collector.js                  → Listing-Feature
 content.js                             → Entry Point (zuletzt)
 ```
 
@@ -257,15 +261,16 @@ Kein npm, keine node_modules, keine Abhängigkeiten. Produziert:
 
 | Datei | Inhalt |
 |-------|--------|
-| `dist/content.js` | Alles konkateniert, in IIFE gewrappt (~131 KB) |
+| `dist/content.js` | Alles konkateniert, in IIFE gewrappt (~142 KB) |
 | `dist/userscript.js` | Wie content.js, aber mit GM_*-Shim statt chrome.storage |
+| `dist/settings-schema.js` | Settings-Schema für popup.html (Shared-Bundle) |
 | `dist/content.css` | Placeholder (Styles leben in JS) |
 
 `build.js` macht zwei Dinge:
 1. Dateien in `MODULE_ORDER` lesen und konkatenieren
 2. `if (typeof module !== 'undefined') module.exports = ...` Zeilen herausfiltern (damit Node.js-Tests möglich sind, ohne dass der Browser `module` kennen muss)
 
-Warum kein ES-Module-Setup? → Siehe [`docs/adr/001-build-system.md`](docs/adr/001-build-system.md)
+Warum kein ES-Module-Setup? → Siehe [`docs/adr-001-build-system.md`](docs/adr-001-build-system.md)
 
 ---
 
@@ -273,7 +278,7 @@ Warum kein ES-Module-Setup? → Siehe [`docs/adr/001-build-system.md`](docs/adr/
 
 ### Neues Core-Modul anlegen
 
-1. Datei nach `src/core/mein-modul.js` kopieren (Vorlage: `src/_template/MODULE_TEMPLATE.js`)
+1. Datei nach `src/core/mein-modul.js` kopieren (Vorlage: `src/_template.js`)
 2. IIFE-Pattern beibehalten: `const MeinModul = (() => { ... return { ... }; })();`
 3. `module.exports`-Guard ans Ende: `if (typeof module !== 'undefined') module.exports = { MeinModul };`
 4. In `build.js` → `MODULE_ORDER` an der richtigen Stelle eintragen (vor den Modulen die es nutzen)
@@ -281,14 +286,21 @@ Warum kein ES-Module-Setup? → Siehe [`docs/adr/001-build-system.md`](docs/adr/
 
 ### Neues Feature-Modul anlegen
 
-Wie Core, aber nach `src/features/mein-feature/mein-feature.js`. In `content.js` dann:
+Wie Core, aber nach `src/features/mein-feature.js`. Namenskonvention: Präfix statt Ordner bei Mehrdatei-Features (z. B. `deal-filter-engine.js` + `deal-filter-ui.js`). In `content.js` dann:
 ```js
 if (typeof MeinFeature !== 'undefined') safeInit('MeinFeature', () => MeinFeature.init());
 ```
 
 ### Experimentelles Feature (Sandbox)
 
-Code nach `src/sandbox/mein-experiment.js` — dieser Ordner ist **nicht** in `MODULE_ORDER` und landet nie im Build. Perfekt für riskante Ideen ohne Auswirkung auf den Filter.
+Konvention siehe [`docs/SANDBOX.md`](docs/SANDBOX.md): experimenteller Code liegt in `src/` mit Dateiname `x-experiment.js` o. ä. und wird **nicht** in `MODULE_ORDER` eingetragen — er landet nie im Build. Perfekt für riskante Ideen ohne Auswirkung auf den Filter.
+
+### Tests laufen
+
+```bash
+node tests/run-tests.js        # alle Suiten
+node tests/filter-engine.test.js  # einzelne Suite
+```
 
 ### Settings erweitern
 
@@ -317,7 +329,7 @@ Fehler-Log erscheint unten im Settings-Modal (nur bei aktivem Debug und wenn Feh
 
 | Entscheidung | Gewählt | Warum |
 |---|---|---|
-| Build-System | Eigenes `build.js` (Concatenation) | MV3 Content Scripts unterstützen kein `type=module`; externer Bundler überdimensioniert für 15 Dateien. Details: [ADR 001](docs/adr/001-build-system.md) |
+| Build-System | Eigenes `build.js` (Concatenation) | MV3 Content Scripts unterstützen kein `type=module`; externer Bundler überdimensioniert für 15 Dateien. Details: [ADR 001](docs/adr-001-build-system.md) |
 | CSS | CSS Custom Properties (`--mdm-*`) in `@layer mdm` | Cascade-Isolation gegen mydealz-eigene Styles; kein Shadow DOM nötig |
 | Storage | `chrome.storage.local` | Überlebt Seiten-Reloads, synchronisiert zwischen Tabs via Background Worker |
 | DOM-Selektion | `data-t`-Attribute bevorzugt | Stabile Analytics-Attribute, überleben CSS-Framework-Updates |

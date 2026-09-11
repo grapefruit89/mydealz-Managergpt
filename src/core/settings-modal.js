@@ -121,6 +121,29 @@ function injectModalStyles() {
     '    color: var(--mdm-danger);',
     '  }',
 
+    '  #'+MODAL_ID+' .mdm-suggest {',
+    '    display: inline-flex;',
+    '    align-items: center;',
+    '    gap: 4px;',
+    '    background: var(--mdm-surface-2);',
+    '    border: 1px solid var(--mdm-border);',
+    '    border-radius: 20px;',
+    '    padding: 3px 10px;',
+    '    font-size: 12px;',
+    '    cursor: pointer;',
+    '    color: var(--mdm-text);',
+    '    transition: background 0.12s, border-color 0.12s;',
+    '  }',
+    '  #'+MODAL_ID+' .mdm-suggest:hover {',
+    '    background: color-mix(in srgb, var(--mdm-accent) 12%, var(--mdm-surface));',
+    '    border-color: var(--mdm-accent);',
+    '    color: var(--mdm-accent);',
+    '  }',
+    '  #'+MODAL_ID+' .mdm-suggest--added {',
+    '    opacity: 0.55;',
+    '    pointer-events: none;',
+    '  }',
+
     '  #' + MODAL_ID + ' .mdm-btn-row {',
     '    display: flex;',
     '    gap: 8px;',
@@ -285,7 +308,7 @@ const SettingsModal = (() => {
     modal.querySelector('#mdm-btn-save')?.addEventListener('click', function() { _save(modal, contextDeal); });
     modal.querySelector('#mdm-btn-cancel')?.addEventListener('click', close);
     modal.querySelector('#mdm-btn-reset')?.addEventListener('click', async function() {
-      if (confirm('Alle Einstellungen zuruecksetzen?')) {
+      if (confirm('Alle Einstellungen zuruecksetzen?\n(Ausgeblendete Deals bleiben erhalten)')) {
         await SettingsStore.reset();
         close();
         window.__mdm_app?.reprocess?.();
@@ -298,8 +321,21 @@ const SettingsModal = (() => {
       modal.querySelector('.mdm-error-log')?.remove();
     });
 
-    // Tag-Entfernung per Klick
+    // Tag-Entfernung per Klick + Vorschlags-Chips übernehmen
     modal.addEventListener('click', function(e) {
+      const sug = e.target.closest('.mdm-suggest');
+      if (sug) {
+        const input = modal.querySelector('#mdm-exclude-words');
+        const word  = sug.dataset.word;
+        if (input && word) {
+          const current = _splitCSV(input.value ?? '');
+          if (!current.includes(word)) current.push(word);
+          input.value = current.join(', ');
+        }
+        sug.textContent = '✓ ' + word;
+        sug.classList.add('mdm-suggest--added');
+        return;
+      }
       const tag = e.target.closest('.mdm-tag');
       if (tag) tag.remove();
     });
@@ -369,6 +405,37 @@ const SettingsModal = (() => {
     return str.split(',').map(function(s) { return s.trim(); }).filter(Boolean);
   }
 
+  /**
+   * Filterwort-Vorschläge: häufigste Tokens (≥4 Zeichen) aus den Titeln der
+   * Deal-Karten der aktuellen Seite, ohne bereits gefilterte/whitelisted
+   * Wörter. Quelle: Original-Extras (Funktionsübersicht).
+   */
+  function _titleSuggestions(settings) {
+    if (typeof DealParser === 'undefined') return [];
+    const existing = new Set([
+      ...(settings.mdm_excludeWords ?? []),
+      ...(settings.mdm_whitelistWords ?? []),
+    ].flatMap(w => String(w).toLowerCase().split(/\s+/)));
+
+    const STOP = new Set(['und', 'oder', 'der', 'die', 'das', 'mit', 'für', 'von',
+      'zum', 'zur', 'auf', 'ab', 'im', 'am', 'als', 'aus', 'beim', 'bis', 'nur',
+      'neu', 'neue', 'pro', 'kit', 'set', 'pack', 'free', 'versand', 'kostenlos']);
+    const counts = {};
+    DealParser.findAll().forEach(function(el) {
+      const title = el.dataset.mdmOrigTitle
+        ?? (el.querySelector('[data-t="threadLink"]')?.textContent ?? '');
+      String(title).toLowerCase().match(/[a-zäöüß0-9]{4,}/g)?.forEach(function(w) {
+        if (STOP.has(w)) return;
+        counts[w] = (counts[w] ?? 0) + 1;
+      });
+    });
+    return Object.entries(counts)
+      .filter(([, n]) => n >= 3)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([w]) => w);
+  }
+
   function _buildHTML(s, deal) {
     const excludeWords    = (s.mdm_excludeWords ?? []).join(', ');
     const whitelistWords  = (s.mdm_whitelistWords ?? []).join(', ');
@@ -411,6 +478,23 @@ const SettingsModal = (() => {
       ].join('\n');
     }
 
+    // -- Filterwort-Vorschläge aus Deal-Titeln der aktuellen Seite -----------
+    // Quelle: Original-Extras „Vorschläge für Filterwörter basierend auf
+    // Deal-Titeln" (Funktionsübersicht). Häufigste Tokens ≥4 Zeichen, die
+    // weder in excludeWords noch whitelistWords stecken.
+    const suggestions  = _titleSuggestions(s);
+    const suggestHtml  = suggestions.length ? [
+      '<div class="mdm-section">',
+      '  <label>Filterwort-Vorschläge (aus Deal-Titeln dieser Seite)</label>',
+      '  <div class="mdm-tag-list">',
+      suggestions.map(function(w) {
+        return '<span class="mdm-suggest" data-word="' + _esc(w) + '">+ ' + _esc(w) + '</span>';
+      }).join(''),
+      '  </div>',
+      '  <div style="font-size:11px;color:var(--mdm-text-muted);margin-top:4px">Klick fügt das Wort zu „Wörter ausblenden" hinzu</div>',
+      '</div>',
+    ].join('\n') : '';
+
     return [
       '<h2>mydealz Manager – Einstellungen</h2>',
 
@@ -425,6 +509,8 @@ const SettingsModal = (() => {
       '    Wortgrenzen-Match: "apple" trifft nicht "pineapple"',
       '  </div>',
       '</div>',
+
+      suggestHtml,
 
       '<div class="mdm-section">',
       '  <label for="mdm-whitelist-words">Whitelist (Wörter die nie versteckt werden)</label>',
@@ -446,8 +532,16 @@ const SettingsModal = (() => {
       '</div>',
 
       '<div class="mdm-section">',
-      '  <label for="mdm-max-price">Maximaler Preis (€, leer = kein Limit)</label>',
-      '  <input type="number" id="mdm-max-price" value="' + _esc(String(maxPrice)) + '" min="0" step="0.01" placeholder="z.B. 50">',
+      '  <div style="display:flex;gap:8px">',
+      '    <div style="flex:1">',
+      '      <label for="mdm-max-price">Maximaler Preis (€, leer = kein Limit)</label>',
+      '      <input type="number" id="mdm-max-price" value="' + _esc(String(maxPrice)) + '" min="0" step="0.01" placeholder="z.B. 50">',
+      '    </div>',
+      '    <div style="flex:1">',
+      '      <label for="mdm-min-discount">Mindest-Rabatt (%, leer = kein Limit)</label>',
+      '      <input type="number" id="mdm-min-discount" value="' + _esc(String(s.mdm_minDiscount ?? '')) + '" min="0" max="100" step="1" placeholder="z.B. 20">',
+      '    </div>',
+      '  </div>',
       '</div>',
 
       '<div class="mdm-section">',
@@ -456,8 +550,24 @@ const SettingsModal = (() => {
       '    <label for="mdm-hide-cold" style="margin:0;font-weight:400">Kalte Deals (&lt; 0°) ausblenden</label>',
       '  </div>',
       '  <div class="mdm-checkbox-row">',
+      '    <input type="checkbox" id="mdm-hide-own-cold"' + (s.mdm_hideOwnColdVotes ? ' checked' : '') + '>',
+      '    <label for="mdm-hide-own-cold" style="margin:0;font-weight:400">Eigene Cold-Votes ausblenden</label>',
+      '  </div>',
+      '  <div class="mdm-checkbox-row">',
       '    <input type="checkbox" id="mdm-hide-merchant-names"' + (s.mdm_hideMatchingMerchantNames ? ' checked' : '') + '>',
       '    <label for="mdm-hide-merchant-names" style="margin:0;font-weight:400">Händlernamen auch im Titel prüfen</label>',
+      '  </div>',
+      '  <div class="mdm-checkbox-row">',
+      '    <input type="checkbox" id="mdm-hide-nsfw"' + (s.mdm_hideNsfw ? ' checked' : '') + '>',
+      '    <label for="mdm-hide-nsfw" style="margin:0;font-weight:400">NSFW-gegraute Deals ausblenden</label>',
+      '  </div>',
+      '  <div class="mdm-checkbox-row">',
+      '    <input type="checkbox" id="mdm-strip-merchant-title"' + (s.mdm_stripMerchantTitle ? ' checked' : '') + '>',
+      '    <label for="mdm-strip-merchant-title" style="margin:0;font-weight:400">Händlernamen aus Deal-Titeln entfernen</label>',
+      '  </div>',
+      '  <div class="mdm-checkbox-row">',
+      '    <input type="checkbox" id="mdm-remember-sort"' + (s.mdm_rememberSort ? ' checked' : '') + '>',
+      '    <label for="mdm-remember-sort" style="margin:0;font-weight:400">Sortierpräferenz merken (Neueste/Beliebteste, Suche)</label>',
       '  </div>',
       '  <div class="mdm-checkbox-row">',
       '    <input type="checkbox" id="mdm-debug"' + (s.mdm_debugEnabled ? ' checked' : '') + '>',
@@ -510,8 +620,14 @@ const SettingsModal = (() => {
     const blockedUsers   = _splitCSV(modal.querySelector('#mdm-blocked-users')?.value ?? '');
     const maxPriceRaw    = modal.querySelector('#mdm-max-price')?.value ?? '';
     const maxPrice       = maxPriceRaw !== '' ? parseFloat(maxPriceRaw) : null;
+    const minDiscRaw     = modal.querySelector('#mdm-min-discount')?.value ?? '';
+    const minDiscount    = minDiscRaw !== '' ? parseFloat(minDiscRaw) : null;
     const hideCold       = modal.querySelector('#mdm-hide-cold')?.checked ?? false;
+    const hideOwnCold    = modal.querySelector('#mdm-hide-own-cold')?.checked ?? false;
     const hideMerchantNames = modal.querySelector('#mdm-hide-merchant-names')?.checked ?? false;
+    const hideNsfw          = modal.querySelector('#mdm-hide-nsfw')?.checked ?? false;
+    const stripMerchantTitle = modal.querySelector('#mdm-strip-merchant-title')?.checked ?? false;
+    const rememberSort      = modal.querySelector('#mdm-remember-sort')?.checked ?? false;
     const debug          = modal.querySelector('#mdm-debug')?.checked ?? false;
 
     // Merchant-Tags (verbleibende nach Nutzer-Entfernung)
@@ -551,8 +667,13 @@ const SettingsModal = (() => {
     await SettingsStore.setBlockedUsers(blockedUsers);
     await SettingsStore.setExcludeMerchants(merchantsObj);
     await SettingsStore.setMaxPrice(isNaN(maxPrice) ? null : maxPrice);
+    await SettingsStore.setMinDiscount(isNaN(minDiscount) ? null : minDiscount);
     await SettingsStore.setHideColdDeals(hideCold);
+    await SettingsStore.setHideOwnColdVotes(hideOwnCold);
     await SettingsStore.setHideMerchantNames(hideMerchantNames);
+    await SettingsStore.setHideNsfw(hideNsfw);
+    await SettingsStore.setStripMerchantTitle(stripMerchantTitle);
+    await SettingsStore.setRememberSort(rememberSort);
     await SettingsStore.setDebugEnabled(debug);
     await SettingsStore.setTierEnabled(tierEnabled);
     await SettingsStore.setTierAMax(tierAMax);

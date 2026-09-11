@@ -1,136 +1,315 @@
 /**
  * graphql-client.js
- * Thin GraphQL client for mydealz / preisjaeger.at.
+ * GraphQL access layer for mydealz / preisjaeger.at — VERIFIED SHAPES ONLY.
  *
- * Auth: reads x-xsrf-token from the page's CSRF meta tag or cookie.
+ * Quelle: /home/moritz/repos/MydealzExporter/data_insights.md + content/listing.js
+ * (live verifiziert am 2026-09-09 gegen mydealz.de, eingeloggte Session nötig —
+ * anonyme Queries antworten mit { message: "Whiiiiiiieeee" }).
  *
- * Key queries (confirmed working):
- *   - comments(filter, limit, page)
- *   - replies (via mainCommentId filter)
- *   - search threads (dynamic POST to /graphql)
+ * Verifizierte Grundregeln (nicht mehr raten!):
+ *   - Thread:  thread(threadId: { eq: <id> })  + 24-Feld-Inventar (THREAD_FIELDS)
+ *   - Batching: Alias-Trick `t<id>: thread(...)`, 30 Threads pro Request
+ *   - Kommentare: comments(filter: CommentFilter) mit threadId { eq }
+ *   - Replies: Composite-Key mainCommentId + threadId (ohne threadId antwortet
+ *     die API still gar nicht!), 30 Parents pro Request via Aliase
+ *   - repliesPreview: Root-Kommentare enthalten die meisten Replies bereits —
+ *     oft braucht es gar keine Extra-Calls
+ *   - Throttling: mydealz liefert gelegentlich HTTP 200 + HTML statt JSON —
+ *     wird als erkannter Fehler geworfen, nie als SyntaxError
  *
- * Persisted query hashes change on each deploy — do NOT hardcode them.
- * Use dynamic POST queries for reliability.
+ * Persisted query hashes are NOT used — dynamic POST queries only.
  */
 
 const GraphQLClient = (() => {
-  const GQL_ENDPOINT  = '/graphql';
-  const REQUEST_TYPE  = 'application/vnd.pepper.v1+json';
-  const PEPPER_TXN    = 'threads.show.deal';
-  const MAX_RETRIES   = 3;
-  const RETRY_BASE_MS = 1000;
+  const GQL_ENDPOINT = '/graphql';
 
-  // ── CSRF token ──────────────────────────────────────────────────────────────
+  // ── Robustheit (Muster PepperDealsScraper, verifiziert im MydealzExporter) ──
+  const RETRY_STATUS        = new Set([408, 429, 500, 502, 503, 504]); // nur transiente Fehler
+  const RETRY_MAX_ATTEMPTS  = 2;      // zusätzlich zum ersten Versuch
+  const RETRY_BASE_DELAY_MS = 800;    // exponentiell: 800 → 1600 ms
+  const BATCH_CHUNK_SIZE    = 30;     // Aliase pro Request (Threads UND Replies)
+  const PAUSE_BETWEEN_BATCHES_MS = 400; // Höflichkeitspause zwischen Chunks (300–700-Band)
+
+  function _pause(ms) {
+    return new Promise(r => setTimeout(r, ms));
+  }
+
+  // ── CSRF token (Meta-Tag → xsrf_t-Cookie mit Unquoting) ─────────────────────
+  // Wichtig: der Cookie-Wert ist oft URI-kodiert UND in Quotes — ohne Unquote
+  // wird der Token still ungültig.
 
   function _getCsrfToken() {
     // 1. Meta tag (most reliable)
     const meta = document.querySelector('meta[name="csrf-token"]');
-    if (meta) return meta.getAttribute('content');
+    if (meta?.content) return meta.content;
 
     // 2. Cookie fallback
-    const m = document.cookie.match(/xsrf_t=([^;]+)/);
-    if (m) return decodeURIComponent(m[1]);
-
-    return null;
+    const m = document.cookie?.match(/xsrf_t=([^;]+)/);
+    if (!m) return null;
+    let val = decodeURIComponent(m[1]);
+    if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
+    return val;
   }
 
-  // ── Core fetch ──────────────────────────────────────────────────────────────
+  // ── Core fetch mit Retry/Backoff ────────────────────────────────────────────
+
+  /**
+   * Fetch mit Pepper-Retry-Politik:
+   *   - nur transiente Fehler wiederholen (408/429/5xx, Netzwerkfehler)
+   *   - 403/404 sofort werfen (Session weg / nicht gefunden — Retrying hilft nie)
+   *   - Retry-After-Header schlägt eigenes Backoff
+   */
+  async function _fetchWithRetry(bodyObj) {
+    const options = {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type':     'application/json',
+        'X-CSRF-TOKEN':     _getCsrfToken() ?? '',
+        'x-requested-with': 'XMLHttpRequest',
+      },
+      body: JSON.stringify(bodyObj),
+    };
+
+    let lastRes = null;
+    let lastErr = null;
+
+    for (let attempt = 0; attempt <= RETRY_MAX_ATTEMPTS; attempt++) {
+      if (attempt > 0) {
+        let delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        // Server-Hinweis schlägt Eigen-Backoff
+        const retryAfter = parseInt(lastRes?.headers?.get('Retry-After') || '', 10);
+        if (retryAfter > 0) delay = Math.max(delay, retryAfter * 1000);
+        if (typeof Logger !== 'undefined') {
+          Logger.warn('GraphQLClient', `Retry ${attempt}/${RETRY_MAX_ATTEMPTS} in ${Math.round(delay / 1000)}s`);
+        }
+        await _pause(delay);
+      }
+
+      let res;
+      try {
+        res = await fetch(GQL_ENDPOINT, options);
+      } catch (err) {
+        lastErr = err; // Netzwerkfehler → Retry
+        continue;
+      }
+      lastRes = res;
+
+      if (res.ok) break;
+      if (RETRY_STATUS.has(res.status) && attempt < RETRY_MAX_ATTEMPTS) continue;
+      throw new Error(`[MDM GQL] HTTP ${res.status} ${res.statusText}`);
+    }
+
+    if (!lastRes || !lastRes.ok) {
+      throw lastErr || new Error('[MDM GQL] Fetch fehlgeschlagen');
+    }
+
+    // ── Throttle-Erkennung: mydealz liefert bei Drosselung 200 + HTML ──────────
+    const contentType = lastRes.headers.get('content-type') ?? '';
+    const text = await lastRes.text();
+    if (!contentType.includes('json') && !text.trimStart().startsWith('{')) {
+      throw new Error('[MDM GQL] Rate-Limit vermutet: Server lieferte HTML statt JSON (HTTP 200)');
+    }
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      throw new Error('[MDM GQL] Antwort war kein gültiges JSON (Drosselung oder Deploy?)');
+    }
+    return json;
+  }
 
   /**
    * Execute a GraphQL query via POST.
-   * @param {string} query       – GraphQL query string
+   * @param {string} queryStr    – GraphQL query string
    * @param {Object} variables   – variables object
    * @returns {Promise<Object>}  – parsed { data, errors }
    */
   async function query(queryStr, variables = {}) {
-    const token = _getCsrfToken();
-    const headers = {
-      'Content-Type':   'application/json',
-      'x-request-type': REQUEST_TYPE,
-      'x-pepper-txn':   PEPPER_TXN,
-    };
-    if (token) headers['x-xsrf-token'] = token;
-
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      const response = await fetch(GQL_ENDPOINT, {
-        method:      'POST',
-        credentials: 'same-origin',
-        headers,
-        body: JSON.stringify({ query: queryStr, variables }),
-      });
-
-      // Rate-limit: honour Retry-After header, then retry
-      if (response.status === 429) {
-        const retryAfter = parseInt(response.headers.get('Retry-After'), 10) || (attempt * 2);
-        console.warn(`[MDM GQL] Rate-limited. Warte ${retryAfter}s (Versuch ${attempt}/${MAX_RETRIES})…`);
-        await new Promise(r => setTimeout(r, retryAfter * 1000));
-        if (attempt === MAX_RETRIES) throw new Error('[MDM GQL] Rate-limit: maximale Wiederholungen erreicht');
-        continue;
+    const json = await _fetchWithRetry({ query: queryStr, variables });
+    if (json.errors?.length) {
+      // GQL-Fehler sind oft "Hinweise" (ein ungültiges Alias leert nur dessen Antwort)
+      if (typeof Logger !== 'undefined') {
+        Logger.warn('GraphQLClient', `GQL errors: ${json.errors.map(e => e.message ?? JSON.stringify(e)).join(' | ')}`);
       }
-
-      if (!response.ok) {
-        if (attempt < MAX_RETRIES) {
-          await new Promise(r => setTimeout(r, RETRY_BASE_MS * attempt));
-          continue;
-        }
-        throw new Error(`[MDM GQL] HTTP ${response.status} ${response.statusText}`);
-      }
-
-      const json = await response.json();
-      if (json.errors?.length) {
-        console.warn('[MDM GQL] GraphQL errors:', json.errors);
-      }
-      return json;
     }
+    return json;
   }
 
-  // ── Comment queries (tested & working) ─────────────────────────────────────
+  // ── Thread-Batch (verifiziert: Alias-Trick, 30 Threads pro Request) ─────────
+  // Alle Feldnamen live verifiziert (MydealzExporter THREAD_FIELDS, 2026-09-09).
 
-  // Note: preparedHtmlContent (HTML) and createdAtTs (unix timestamp) are confirmed
-  // working field names from the mydealz GraphQL API (verified in MyDealz_01_Deep_State_AI_Exporter).
-  const Q_COMMENTS = `
-    query comments($filter: CommentFilter!, $limit: Int, $page: Int) {
-      comments(filter: $filter, limit: $limit, page: $page) {
-        items {
-          commentId
-          replyCount
-          preparedHtmlContent
-          createdAtTs
-          voteScore
-          user {
-            username
-            bestBadge { level { name } }
-          }
-          reactionCounts { type count }
-        }
-        pagination { last }
+  const THREAD_FIELDS = `
+    title
+    price
+    displayPrice
+    nextBestPrice
+    priceOff
+    priceDiscount
+    description
+    url
+    shareableLink
+    temperature
+    commentCount
+    isExpired
+    publishedAt
+    createdAt
+    user { username userId }
+    merchant { merchantId merchantName }
+    mainImage { uid path }
+    mainGroup { threadGroupId threadGroupName threadGroupUrlName }
+    groupsPath { threadGroupId threadGroupName threadGroupUrlName }
+    shipping { isFree price }
+    updatedAt
+    voucherCode
+    temperatureLevel
+    type
+    selectedLocations { isNational }
+  `.trim();
+  // ACHTUNG (live verifiziert 2026-09-11): `keywordNames` wirft
+  // "Internal server error" und leert DAMIT das GESAMTE Alias-Ergebnis
+  // (methodik.md §1: ein abgelehntes Feld killt den ganzen Batch).
+  // Nicht wieder einbauen — falls nötig, in einen separaten Einzel-Query.
+
+  /**
+   * Holt Threads per Alias-Batching (30er-Chunks, Höflichkeitspausen).
+   * @param {string[]|number[]} ids        – Thread-IDs
+   * @param {Object} [opts]
+   * @param {number} [opts.chunkSize]      – Aliase pro Request (default 30)
+   * @param {Function} [opts.onProgress]   – (done, total, label) callback
+   * @returns {Promise<Object[]>} – normalisierte Thread-Objekte; fehlende IDs
+   *                                kommen NICHT im Ergebnis vor.
+   */
+  async function fetchThreadBatch(ids, { chunkSize = BATCH_CHUNK_SIZE, onProgress } = {}) {
+    if (!ids?.length) return [];
+    const out = [];
+    const totalChunks = Math.ceil(ids.length / chunkSize);
+
+    for (let i = 0; i < ids.length; i += chunkSize) {
+      const chunk = ids.slice(i, i + chunkSize);
+      const chunkNum = Math.floor(i / chunkSize) + 1;
+
+      if (totalChunks > 1) onProgress?.(i, ids.length, `Batch ${chunkNum}/${totalChunks}…`);
+
+      const aliases = chunk
+        .map(id => `t${id}: thread(threadId: { eq: ${id} }) { ${THREAD_FIELDS} }`)
+        .join('\n');
+
+      const json = await query(`query { ${aliases} }`);
+
+      for (const id of chunk) {
+        const d = json.data?.[`t${id}`];
+        if (!d) continue; // nicht gefunden / gelöscht → überspringen
+        out.push(_normalizeGqlThread(d, String(id)));
       }
-    }
-  `;
 
-  const Q_REPLIES = `
-    query comments($filter: CommentFilter!, $limit: Int) {
-      comments(filter: $filter, limit: $limit) {
-        items {
-          commentId
-          parentCommentId
-          preparedHtmlContent
-          createdAtTs
-          voteScore
-          user { username }
-          reactionCounts { type count }
-        }
+      if (i + chunkSize < ids.length) await _pause(PAUSE_BETWEEN_BATCHES_MS);
+    }
+    return out;
+  }
+
+  /**
+   * Normalisiert ein verifiziertes GQL-Thread-Objekt in ein einheitliches Feldset.
+   * Feldprinzip: alle Felder existieren, fehlende Werte sind null.
+   */
+  function _normalizeGqlThread(d, id) {
+    // Rabatt % aus GQL-Feld oder aus Preis-Delta berechnen (Export-Muster)
+    let discountPct = d.priceDiscount;
+    if (discountPct == null && d.nextBestPrice && d.price != null && d.nextBestPrice > d.price) {
+      discountPct = Math.round((d.nextBestPrice - d.price) / d.nextBestPrice * 100);
+    }
+
+    const iso = ts => (ts ? new Date(ts * 1000).toISOString() : null);
+
+    return {
+      id:             String(id),
+      // d.url ist oft relativ — absolutisieren. Fallback: ID-only URL
+      // (live verifiziert 2026-09-11: https://mydealz.de/<id> → 301 auf die
+      // echte Detailseite; /deals/<id> OHNE Slug wäre die "Ups"-Seite).
+      url:            _absolute(d.url) || `${location.origin}/${id}`,
+      shareLink:      d.shareableLink || '',
+      title:          d.title || '',
+      description:    _htmlToText(d.description),
+      descriptionHtml:d.description || '',
+      price:          d.price ?? null,
+      displayPrice:   d.displayPrice || null,
+      originalPrice:  d.nextBestPrice ?? null,
+      priceOff:       d.priceOff ?? null,
+      discountPct,    // signed: positiv = Ersparnis in %, null = unbekannt
+      shippingFree:   d.shipping?.isFree ?? null,
+      shippingPrice:  d.shipping?.price ?? null,
+      temperature:    d.temperature ?? null,
+      temperatureLevel: d.temperatureLevel ?? null,
+      commentCount:   d.commentCount ?? null,
+      isExpired:      d.isExpired ?? false,
+      voucherCode:    d.voucherCode || null,
+      type:           d.type ?? null,
+      username:       d.user?.username || '',
+      userId:         d.user?.userId ?? '',
+      merchantName:   d.merchant?.merchantName || '',
+      merchantId:     d.merchant?.merchantId ? String(d.merchant.merchantId) : '',
+      imageUrl:       _buildImageUrl(d.mainImage),
+      publishedAt:    iso(d.publishedAt),
+      createdAt:      iso(d.createdAt),
+      updatedAt:      iso(d.updatedAt),
+      group:          d.mainGroup?.threadGroupName || null,
+      groupPath:      (d.groupsPath ?? []).map(g => g.threadGroupName).filter(Boolean),
+      _source: 'graphql',
+    };
+  }
+
+  function _buildImageUrl(mainImage) {
+    if (!mainImage?.uid || !mainImage?.path) return null;
+    // Pepper-CDN-Muster: static.<domain>/{path}/{uid}/fs/895x577/qt/65/{uid}
+    // (mydealz.de live verifiziert 2026-09-11; hotukdeals.com/dealabs.com/pepper.pl/
+    //  nl.pepper.com nutzen dieselbe Engine — gleiche static-Host-Annahme)
+    return `https://static.${location.hostname}/${mainImage.path}/${mainImage.uid}/fs/895x577/qt/65/${mainImage.uid}`;
+  }
+
+  /** Relativ-URL (z. B. "/deals/foo-123") zu absoluter URL machen; '' bei leeren Werten. */
+  function _absolute(url) {
+    if (!url) return '';
+    return url.startsWith('http') ? url : `${location.origin}${url}`;
+  }
+
+  function _htmlToText(html) {
+    if (!html) return '';
+    const tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    const text = tmp.innerText ?? tmp.textContent ?? '';
+    return text.replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  // ── Kommentar-Queries (verifiziert, inkl. repliesPreview) ───────────────────
+  // Composite-Key-Pflicht: replies NUR mit mainCommentId UND threadId.
+
+  const COMMENT_FIELDS = `
+    commentId mainCommentId threadId
+    preparedHtmlContent createdAt createdAtTs
+    deletedBy { username }
+    replyCount
+    user { username userId }
+    reactionCounts { type count }
+  `.trim();
+
+  const Q_COMMENTS = `
+    query($filter: CommentFilter!, $limit: Int, $page: Int) {
+      comments(filter: $filter, limit: $limit, page: $page) {
+        items { ${COMMENT_FIELDS} repliesPreview { ${COMMENT_FIELDS} } }
+        pagination { last count current }
       }
     }
   `;
 
   /**
    * Fetch one page of top-level comments for a thread.
+   * items[].repliesPreview enthält die Replies bereits — parseReplyTree()
+   * baut daraus den kompletten Baum ohne Extra-Calls.
    * @param {string|number} threadId
    * @param {number} page    – 1-based
    * @param {number} limit
    */
-  async function fetchComments(threadId, page = 1, limit = 50) {
+  async function fetchComments(threadId, page = 1, limit = 100) {
     const variables = {
       filter: {
         threadId: { eq: String(threadId) },
@@ -140,151 +319,76 @@ const GraphQLClient = (() => {
       page,
     };
     const result = await query(Q_COMMENTS, variables);
-    return result?.data?.comments;
+    return result?.data?.comments ?? null;
   }
 
   /**
-   * Fetch all comment pages for a thread.
+   * Fetch all comment pages for a thread (politeness pauses between pages).
    * @param {string|number} threadId
-   * @param {Function}      onProgress – optional (currentPage, totalPages) callback
+   * @param {Function}      onProgress – optional (page, lastPage) callback
    */
   async function fetchAllComments(threadId, onProgress) {
-    const all   = [];
-    let   page  = 1;
-    let   total = 1;
+    const all = [];
+    let page  = 1;
+    let last  = 1;
 
     do {
       const batch = await fetchComments(threadId, page);
       if (!batch) break;
       all.push(...(batch.items ?? []));
-      total = batch.pagination?.last ?? page;
-      onProgress?.(page, total);
+      last = batch.pagination?.last ?? page;
+      onProgress?.(page, last);
       page++;
-    } while (page <= total);
+      if (page <= last) await _pause(PAUSE_BETWEEN_BATCHES_MS);
+    } while (page <= last);
 
     return all;
   }
 
   /**
-   * Fetch replies to a specific top-level comment.
+   * Batched Reply-Fetch: bis zu 30 Parents per Request via Alias-Trick.
+   * WICHTIG (mydealz-Absonderheit): ohne threadId im Filter liefert der
+   * Endpunkt still nichts — der Composite-Key mainCommentId + threadId ist
+   * Pflicht (data_insights.md §1).
+   * @param {string|number} threadId
+   * @param {string[]|number[]} parentIds
+   * @param {Object} [opts]
+   * @returns {Promise<Object>} – Map parentId → replies[]
+   */
+  async function fetchRepliesBatch(threadId, parentIds, { chunkSize = BATCH_CHUNK_SIZE, onProgress } = {}) {
+    if (!parentIds?.length) return {};
+    const result = {};
+    const chunks = [];
+    for (let i = 0; i < parentIds.length; i += chunkSize) chunks.push(parentIds.slice(i, i + chunkSize));
+
+    for (let c = 0; c < chunks.length; c++) {
+      const aliases = chunks[c].map(pid =>
+        `r${pid}: comments(filter: { threadId: { eq: ${String(threadId)} }, mainCommentId: ${pid} }, limit: 100) {
+           items { ${COMMENT_FIELDS} }
+         }`
+      ).join('\n');
+
+      const json = await query(`query { ${aliases} }`);
+      const data = json.data || {};
+      for (const pid of chunks[c]) {
+        result[pid] = (data[`r${pid}`]?.items || []);
+      }
+
+      onProgress?.(Math.min((c + 1) * chunkSize, parentIds.length), parentIds.length);
+      if (c < chunks.length - 1) await _pause(PAUSE_BETWEEN_BATCHES_MS);
+    }
+    return result;
+  }
+
+  /**
+   * Fetch replies to a single top-level comment.
    * @param {string} mainCommentId
    * @param {string|number} threadId
    */
   async function fetchReplies(mainCommentId, threadId) {
-    const variables = {
-      filter: {
-        mainCommentId,
-        threadId: { eq: String(threadId) },
-      },
-      limit: 200,
-    };
-    const result = await query(Q_REPLIES, variables);
-    return result?.data?.comments?.items ?? [];
+    const map = await fetchRepliesBatch(threadId, [mainCommentId]);
+    return map[mainCommentId] ?? [];
   }
-
-  // ── Thread / Deal Detail query ──────────────────────────────────────────────
-  //
-  // PRIMARY DATA SOURCE STRATEGY (as requested):
-  //   1. window.__INITIAL_STATE__  → free, already on page, most stable
-  //   2. GraphQL POST              → this query, best-effort (query name guessed)
-  //   3. DOM CSS selectors         → last resort fallback
-  //
-  // The query name "thread" is inferred from the pepper platform schema pattern.
-  // It should survive deploys since GQL schema fields are much more stable than
-  // CSS class names. Introspection is disabled, so we can't auto-discover names.
-
-  const Q_THREAD = `
-    query thread($id: ID!) {
-      thread(id: $id) {
-        threadId
-        title
-        price
-        temperature
-        status
-        publishedAt
-        merchant {
-          merchantId
-          merchantName
-        }
-        user {
-          userId
-          username
-          imageUrls
-        }
-        mainImage {
-          path
-          width
-          height
-        }
-        commentCount
-        voteCount
-        isExpired
-        threadType
-      }
-    }
-  `;
-
-  /**
-   * Fetch full deal data for a single thread by ID via GraphQL.
-   * Falls back to null if the query name doesn't match the server schema.
-   * @param {string|number} threadId
-   * @returns {Promise<Object|null>}
-   */
-  async function fetchThread(threadId) {
-    try {
-      const result = await query(Q_THREAD, { id: String(threadId) });
-      return result?.data?.thread ?? null;
-    } catch (e) {
-      console.warn(`[MDM GQL] fetchThread(${threadId}) failed:`, e.message);
-      return null;
-    }
-  }
-
-  /**
-   * Fetch multiple threads by IDs. Batches via Promise.all.
-   * @param {Array<string|number>} ids
-   * @returns {Promise<Object[]>} – array of thread objects (nulls filtered)
-   */
-  async function fetchThreads(ids) {
-    const results = await Promise.all(ids.map(fetchThread));
-    return results.filter(Boolean);
-  }
-
-  // ── Thread search query ─────────────────────────────────────────────────────
-
-  const Q_SEARCH_THREADS = `
-    query searchThreads($query: String!, $limit: Int, $page: Int, $order: ThreadOrder) {
-      search(query: $query, limit: $limit, page: $page, order: $order) {
-        items {
-          threadId
-          title
-          price
-          temperature
-          merchant { merchantId merchantName }
-          user { username }
-          status
-          publishedAt
-        }
-        pagination { last total }
-      }
-    }
-  `;
-
-  /**
-   * Search threads (best-effort – query name/fields may differ per deploy).
-   * Falls back gracefully if query isn't supported.
-   */
-  async function searchThreads(searchQuery, { limit = 20, page = 1 } = {}) {
-    try {
-      const result = await query(Q_SEARCH_THREADS, { query: searchQuery, limit, page });
-      return result?.data?.search;
-    } catch (e) {
-      console.warn('[MDM GQL] searchThreads not available:', e.message);
-      return null;
-    }
-  }
-
-  // ── Utilities ───────────────────────────────────────────────────────────────
 
   /**
    * Normalise a comment item to a simpler shape.
@@ -292,7 +396,10 @@ const GraphQLClient = (() => {
   function normaliseComment(item) {
     return {
       id:        item.commentId,
+      parentId:  item.mainCommentId || null,
       user:      item.user?.username ?? 'unknown',
+      userId:    item.user?.userId ?? '',
+      deletedBy: item.deletedBy?.username ?? null,
       // createdAtTs is a unix timestamp; convert to ISO date string
       date:      item.createdAtTs
                    ? new Date(item.createdAtTs * 1000).toISOString().split('T')[0]
@@ -306,14 +413,33 @@ const GraphQLClient = (() => {
     };
   }
 
+  /**
+   * Kommentar-ID → vollständige Thread-URL (inkl. #comment-/#reply-Anker).
+   * Verifizierte Query (live 2026-09-11, Quelle: mydealz-Diskussion „Neue
+   * Link-Struktur von Mydealz", Thread 2462696) — löst das alt-Format
+   * `/comments/permalink/<id>` auf das neue Format auf:
+   *   { url: "https://…/deals/<slug>-<id>#comment-<commentId>", commentId }
+   * Anwendungsfall: Permalink-Übersetzung (alte Link-Sammlungen reparieren),
+   * verdeckte-Deals-Liste via Kommentar-IDs.
+   * @param {string|number} commentId
+   * @returns {Promise<{url: string, commentId: string}|null>}
+   */
+  async function fetchCommentUrl(commentId) {
+    const result = await query(
+      'query getComment($id: ID!) { comment(id: $id) { url commentId } }',
+      { id: String(commentId) },
+    );
+    return result?.data?.comment ?? null;
+  }
+
   return {
     query,
-    fetchThread,
-    fetchThreads,
+    fetchThreadBatch,
     fetchComments,
     fetchAllComments,
+    fetchRepliesBatch,
     fetchReplies,
-    searchThreads,
+    fetchCommentUrl,
     normaliseComment,
     getCsrfToken: _getCsrfToken,
   };

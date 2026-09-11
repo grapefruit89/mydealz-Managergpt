@@ -1,5 +1,5 @@
 /**
- * deal-ui.js
+ * deal-filter-ui.js
  * Deal-Karten UI: CSS-Variablen, Ausblenden, Ghost-Mode, ✕/⚙ Buttons.
  *
  * Injiziert auf jede Deal-Karte:
@@ -38,7 +38,7 @@ function injectDealStyles() {
        FUTURE: Farben auf oklch()-Farbraum + natives light-dark() migrieren.
          Beispiel: --mdm-accent: oklch(45% 0.2 264);
          Voraussetzung: ES-Module-Migration abschliessen,
-         siehe docs/adr/001-build-system.md                                  */
+         siehe docs/adr-001-build-system.md                                  */
     :root {
       --mdm-accent:      #1a56db;
       --mdm-accent-dim:  color-mix(in srgb, var(--mdm-accent) 85%, transparent);
@@ -238,11 +238,58 @@ const DealUI = (() => {
     el.classList.toggle(CSS_CLASSES.ghostDeal, isGhost);
   }
 
+  /**
+   * Händlernamen aus Deal-Titel entfernen (Setting mdm_stripMerchantTitle).
+   * Quelle: Original-Script 1.x „Händlernamen aus Titel entfernen".
+   *
+   * Reversibel: der unangetastete Titel wird VOR der ersten Mutation in
+   * `el.dataset.mdmOrigTitle` gecacht — DealParser liest dieses Attribut
+   * bevorzugt, damit (a) das Filter-Matching vom Strip unbeeinflusst bleibt
+   * (blockierter Händler matcht weiter im Original-Titel) und (b) das
+   * Abschalten des Settings den Original-Titel restauriert.
+   */
+  function stripMerchant(el, deal, settings) {
+    const titleEl = el.querySelector('[data-t="threadLink"]')
+                 ?? el.querySelector('.cept-tt, .js-thread-title');
+    if (!titleEl) return;
+
+    // Original sichern (einmalig, vor jeder Mutation)
+    if (el.dataset.mdmOrigTitle === undefined) {
+      el.dataset.mdmOrigTitle = titleEl.textContent.trim();
+    }
+
+    if (!settings.mdm_stripMerchantTitle) {
+      // Restore, falls vorher gestrippt wurde
+      if (el.dataset.mdmStripped === '1') {
+        titleEl.textContent = el.dataset.mdmOrigTitle;
+        delete el.dataset.mdmStripped;
+      }
+      return;
+    }
+
+    const merchant = (deal.merchantName ?? '').trim();
+    if (merchant.length < 3) return;
+
+    // Händlername (Wortgrenzen, case-insensitive) + unmittelbare Trenner
+    // ("Name: ", "Name | ", "[Name] ", "bei Name ") aus dem Titel entfernen
+    const esc = merchant.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(
+      '(?<![a-zA-ZäöüÄÖÜß0-9])' + esc + '(?![a-zA-ZäöüÄÖÜß0-9])\\s*[:|\\-]?\\s*', 'i'
+    );
+    const orig = el.dataset.mdmOrigTitle;
+    const stripped = orig.replace(re, '').trim();
+    if (stripped && stripped !== orig) {
+      titleEl.textContent = stripped;
+      el.dataset.mdmStripped = '1';
+    }
+  }
+
   return {
     init,
     injectButtons,
     setHidden,
     setGhost,
+    stripMerchant,
     setDebugBadge,
     CSS_CLASSES,
   };

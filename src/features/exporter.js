@@ -6,7 +6,14 @@
  * Collects all comments (with nested replies) + deal metadata,
  * caches them in IndexedDB for 1 hour, then opens a popup export window.
  *
+ * ── Reply-Strategie (verifiziert, MydealzExporter-Erkenntnis) ────────────────
+ *   1. repliesPreview aus dem Root-Objekt (gratis — meiste Replies dabei)
+ *   2. Nur Parents mit verdeckten Replies (preview < replyCount) via
+ *      30er-Alias-Batch nachladen (GraphQLClient.fetchRepliesBatch)
+ *   3. Batch-Fehler → graceful degradation auf die Preview-Replies
+ *
  * Dependencies (must be loaded before this module):
+ *   - Logger         (logger.js)
  *   - GraphQLClient  (graphql-client.js)
  */
 
@@ -14,12 +21,19 @@ const Exporter = (() => {
 
   // ── Page detection ─────────────────────────────────────────────────────────
 
+  /**
+   * DETEKTOR statt Pfad-Regex: Detailseiten tragen `threadDetail` im
+   * __INITIAL_STATE__ (live verifiziert 2026-09-11 auf mydealz UND den
+   * fremdsprachigen TLDs). Der alte Pfad-Regex /(deals|diskussion|gutscheine)/
+   * war deutsch — auf dealabs (/bons-plans-3410724), hotukdeals (/deals-…, aber
+   * /offers-Varianten) und Co. hätte er Detailseiten verfehlt.
+   */
   function _isDetailPage() {
-    return /\/(deals|diskussion|gutscheine)\//.test(location.pathname);
+    return !!window.__INITIAL_STATE__?.threadDetail?.threadId;
   }
 
   function _getThreadId() {
-    // 1. __INITIAL_STATE__ (most reliable)
+    // 1. __INITIAL_STATE__ (most reliable — identisch zu _isDetailPage)
     const store = window.__INITIAL_STATE__;
     if (store?.threadDetail?.threadId) return String(store.threadDetail.threadId);
     // 2. URL pattern: /deals/title-12345 or /deals/12345
@@ -86,33 +100,11 @@ const Exporter = (() => {
     return { get, set, remove };
   })();
 
-  // ── GQL queries (use preparedHtmlContent + createdAtTs) ───────────────────
-
-  const _Q_COMMENT_FIELDS = `
-    commentId
-    replyCount
-    preparedHtmlContent
-    reactionCounts { type count }
-    createdAtTs
-    user { username }
-  `;
-
-  const _Q_ROOT = `
-    query comments($filter: CommentFilter!, $limit: Int, $page: Int) {
-      comments(filter: $filter, limit: $limit, page: $page) {
-        items { ${_Q_COMMENT_FIELDS} }
-        pagination { current last }
-      }
-    }
-  `;
-
-  const _Q_REPLIES = `
-    query comments($filter: CommentFilter!, $limit: Int) {
-      comments(filter: $filter, limit: $limit) {
-        items { ${_Q_COMMENT_FIELDS} }
-      }
-    }
-  `;
+  // ── GQL: verifizierte Shapes aus graphql-client.js ──────────────────────────
+  // Q_COMMENTS im Client enthält bereits repliesPreview — die meisten Replies
+  // sind gratis im Root-Objekt enthalten (MydealzExporter-Erkenntnis). Fehlende
+  // (tiefe/verdeckte) Replies laden wir per 30er-Alias-Batch nach — 1 Request
+  // pro 30 Parents statt 1 Request pro Parent.
 
   // ── HTML → plain text + Markdown links ────────────────────────────────────
 
@@ -135,6 +127,37 @@ const Exporter = (() => {
 
   // ── Comment transform ──────────────────────────────────────────────────────
 
+  /**
+   * Reaction-Score (Muster MydealzExporter-Dashboard):
+   * helpful×3 + replies×3 + like×2 + funny — gewichtet "echte Antworten"
+   * höher als Memes und Beifall. warning signal: viel funny + wenig helpful.
+   */
+  function _score(item, replyCount) {
+    let like = 0, helpful = 0, funny = 0;
+    (item.reactionCounts ?? []).forEach(r => {
+      if (r.type === 'LIKE')    like    = r.count;
+      if (r.type === 'HELPFUL') helpful = r.count;
+      if (r.type === 'FUNNY')   funny   = r.count;
+    });
+    return {
+      like, helpful, funny,
+      score: helpful * 3 + (replyCount ?? item.replyCount ?? 0) * 3 + like * 2 + funny,
+    };
+  }
+
+  /**
+   * Kommentar-Permalink (verifizierte mydealz-Formate, Sammlung 2035404):
+   *   Hauptkommentar → ...#comment-<id>
+   *   Antwort        → ...#reply-<id>
+   */
+  function _permalink(item) {
+    if (!item?.commentId) return '';
+    const base = location.origin + location.pathname;
+    return item.mainCommentId
+      ? `${base}#reply-${item.commentId}`
+      : `${base}#comment-${item.commentId}`;
+  }
+
   function _transformComment(item, opUsername) {
     if (!item || !item.user) {
       return {
@@ -142,27 +165,34 @@ const Exporter = (() => {
         user: '[Gelöscht]',
         text: '[Dieser Kommentar wurde entfernt]',
         date: 'N/A',
-        reactions: { like: 0, helpful: 0, funny: 0 },
+        reactions: { like: 0, helpful: 0, funny: 0, score: 0 },
+        permalink: _permalink(item),
         replies: [],
       };
     }
 
-    let like = 0, helpful = 0, funny = 0;
-    (item.reactionCounts ?? []).forEach(r => {
-      if (r.type === 'LIKE')    like    = r.count;
-      if (r.type === 'HELPFUL') helpful = r.count;
-      if (r.type === 'FUNNY')   funny   = r.count;
-    });
-
     let userLabel = item.user.username ?? 'Unbekannt';
     if (opUsername && userLabel === opUsername) userLabel += ' [OP]';
+
+    const reactions = _score(item);
+
+    // createdAtTs (unix) ist verifiziert; Fallback auf createdAt-String
+    let date;
+    if (item.createdAtTs) {
+      date = new Date(item.createdAtTs * 1000).toISOString().split('T')[0];
+    } else if (item.createdAt) {
+      date = new Date(item.createdAt).toISOString().split('T')[0];
+    } else {
+      date = 'N/A';
+    }
 
     return {
       id:        item.commentId,
       user:      userLabel,
       text:      _cleanHtml(item.preparedHtmlContent),
-      date:      new Date((item.createdAtTs ?? 0) * 1000).toISOString().split('T')[0],
-      reactions: { like, helpful, funny },
+      date,
+      reactions: { like: reactions.like, helpful: reactions.helpful, funny: reactions.funny, score: reactions.score },
+      permalink: _permalink(item),
       replies:   [],
     };
   }
@@ -172,14 +202,16 @@ const Exporter = (() => {
   function _formatComments(comments, level = 0) {
     const indent = '  '.repeat(level);
     return comments.map(c => {
-      // Reaction string
+      // Reaction string (Score zeigt KI die Kommentar-Qualität)
       const parts = [];
       if (c.reactions.like    > 0) parts.push(`👍 ${c.reactions.like}`);
       if (c.reactions.helpful > 0) parts.push(`✅ ${c.reactions.helpful}`);
       if (c.reactions.funny   > 0) parts.push(`😄 ${c.reactions.funny}`);
+      if (c.reactions.score   > 0) parts.push(`⭐ ${c.reactions.score}`);
       const reactionStr = parts.length > 0 ? ` [${parts.join(' | ')}]` : '';
+      const linkStr = c.permalink ? ` [↗](${c.permalink})` : '';
 
-      const header = `${indent}👤 **${c.user}** [${c.date}]${reactionStr}`;
+      const header = `${indent}👤 **${c.user}** [${c.date}]${reactionStr}${linkStr}`;
       const body   = `${indent}${c.text.replace(/\n/g, `\n${indent}`)}`;
       let out      = `${header}\n${body}`;
 
@@ -275,26 +307,9 @@ const Exporter = (() => {
   // ── Fetch helpers ──────────────────────────────────────────────────────────
 
   async function _fetchRootPage(threadId, page) {
-    const result = await GraphQLClient.query(_Q_ROOT, {
-      filter: {
-        threadId: { eq: String(threadId) },
-        order:    { direction: 'Ascending' },
-      },
-      limit: 100,
-      page,
-    });
-    return result?.data?.comments ?? null;
-  }
-
-  async function _fetchReplies(mainCommentId, threadId) {
-    const result = await GraphQLClient.query(_Q_REPLIES, {
-      filter: {
-        mainCommentId,
-        threadId: { eq: String(threadId) },
-      },
-      limit: 100,
-    });
-    return result?.data?.comments?.items ?? [];
+    // GraphQLClient.fetchComments: verifizierte Query inkl. repliesPreview,
+    // Pagination { last count current } — siehe graphql-client.js
+    return await GraphQLClient.fetchComments(threadId, page, 100);
   }
 
   // ── Download helper ────────────────────────────────────────────────────────
@@ -537,24 +552,76 @@ const Exporter = (() => {
       const totalPages = firstPage.pagination?.last ?? 1;
       let count = 0;
 
+      /**
+       * Verarbeitet eine Root-Seite:
+       *   1. Replies aus repliesPreview übernehmen (gratis, im Root-Objekt)
+       *   2. Nur Parents mit verdeckten Replies (preview.length < replyCount)
+       *      sammeln → 30er-Alias-Batch-Nachladen (1 Request pro 30 Parents)
+       *   3. Bei Batch-Fehler: graceful degradation auf die Preview-Replies
+       */
       async function processItems(items) {
-        const nodes = [];
-        for (const item of items) {
-          const node = _transformComment(item, opUsername);
-          count++;
-          const progress = `${count}/${meta.KommentarAnzahl || '?'}`;
-          btn.textContent = `⏳ ${progress}`;
+        const nodes       = [];
+        const nodeByParent = new Map();   // commentId → node (für fehlende Replies)
+        const needFetch   = [];
 
-          if (item.replyCount > 0) {
-            const replies = await _fetchReplies(item.commentId, threadId);
-            for (const r of replies) {
+        for (const item of items) {
+          const node    = _transformComment(item, opUsername);
+          const preview = item.repliesPreview ?? [];
+          const missing = item.replyCount > 0 && preview.length < item.replyCount;
+
+          if (!missing) {
+            // Preview deckt alles ab → komplett übernehmen, kein Request
+            for (const r of preview) {
               node.replies.push(_transformComment(r, opUsername));
               count++;
-              btn.textContent = `⏳ ${count}/${meta.KommentarAnzahl || '?'}`;
             }
+          } else {
+            needFetch.push(item.commentId);
+            nodeByParent.set(item.commentId, { node, preview });
           }
+
+          count++;
+          btn.textContent = `⏳ ${count}/${meta.KommentarAnzahl || '?'}`;
           nodes.push(node);
         }
+
+        if (needFetch.length > 0) {
+          try {
+            const map = await GraphQLClient.fetchRepliesBatch(threadId, needFetch, {
+              onProgress: (done, total) => {
+                btn.textContent = `⏳ Replies ${done}/${total} (Batch)…`;
+              },
+            });
+            for (const [pid, { node, preview }] of nodeByParent) {
+              const fetched = map[pid] ?? [];
+              if (fetched.length > 0) {
+                // Komplettliste aus Batch ersetzt die Teil-Preview (keine Duplikate)
+                for (const r of fetched) {
+                  node.replies.push(_transformComment(r, opUsername));
+                  count++;
+                }
+              } else {
+                // API lieferte leer → Preview bleibt beste verfügbare Quelle
+                Logger.warn('Exporter', `Reply-Batch leer für Parent ${pid} — nutze repliesPreview (${preview.length})`);
+                for (const r of preview) {
+                  node.replies.push(_transformComment(r, opUsername));
+                  count++;
+                }
+              }
+            }
+            btn.textContent = `⏳ ${count}/${meta.KommentarAnzahl || '?'}`;
+          } catch (e) {
+            // Batch fehlgeschlagen → Preview-Replies behalten statt ganze Seite zu werfen
+            Logger.warn('Exporter', `Reply-Batch fehlgeschlagen (${e.message}) — nutze repliesPreview als Fallback`);
+            for (const [, { node, preview }] of nodeByParent) {
+              for (const r of preview) {
+                node.replies.push(_transformComment(r, opUsername));
+                count++;
+              }
+            }
+          }
+        }
+
         return nodes;
       }
 
@@ -711,7 +778,7 @@ const Exporter = (() => {
     }
   }
 
-  return { init };
+  return { init, _test: { _transformComment, _score, _permalink, _run } };
 
 })();
 

@@ -12,7 +12,13 @@
 
   "host_permissions": [
     "https://www.mydealz.de/*",
-    "https://www.preisjaeger.at/*"
+    "https://www.preisjaeger.at/*",
+    "https://www.hotukdeals.com/*",
+    "https://www.dealabs.com/*",
+    "https://www.pepper.pl/*",
+    "https://nl.pepper.com/*",
+    "https://www.chollometro.com/*",
+    "https://www.pepperdeals.se/*"
   ],
 
   "background": {
@@ -23,7 +29,13 @@
     {
       "matches": [
         "https://www.mydealz.de/*",
-        "https://www.preisjaeger.at/*"
+        "https://www.preisjaeger.at/*",
+        "https://www.hotukdeals.com/*",
+        "https://www.dealabs.com/*",
+        "https://www.pepper.pl/*",
+        "https://nl.pepper.com/*",
+        "https://www.chollometro.com/*",
+        "https://www.pepperdeals.se/*"
       ],
       "js": ["dist/content.js"],
       "css": ["dist/content.css"],
