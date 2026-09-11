@@ -93,14 +93,10 @@ function render() {
 }
 
 // ── Prompt-Labels (Kopie der Content-Bundle-Keys) ────────────────────────────
-// LOKALE KOPIE — driften mit exporter.js (BUG-Beweis Claude-Review);
-// mittel-/langfristig als SSOT-Modul core/prompt-levels.js (ROADMAP §2.5-Muster)
-const _PROMPT_LABELS = {
-  RAW: '🧱 Rohdaten',
-  SHORT: '⚡ Kurz',
-  MEDIUM: '📝 Mittel',
-  DETAILED: '📚 Lang',
-};
+// Prompt-Labels: SSOT (dist/settings-schema.js = Schema + Prompt-Levels).
+// Quelle: buildPopupShared in build.js. Kein Hand-Kopieren mehr (Bug-Fund
+// Claude-Review: LONG vs. DETAILED driftete still).
+const _PROMPT_LABELS = MdmPromptLevels.LABELS;
 
 // ── Aktionen ──────────────────────────────────────────────────────────────────
 

@@ -226,21 +226,21 @@ const Exporter = (() => {
 
   const _PROMPT_LEVELS = {
     RAW: {
-      label: '🧱 Rohdaten',
+      label: MdmPromptLevels.LABELS.RAW,
       gen: (meta, comments) => JSON.stringify({ meta, comments }, null, 2),
     },
     SHORT: {
-      label: '⚡ Kurz',
+      label: MdmPromptLevels.LABELS.SHORT,
       gen: (meta, comments) =>
         `# Context\n${JSON.stringify(meta, null, 2)}\n\n# Comments\n${_formatComments(comments)}`,
     },
     MEDIUM: {
-      label: '💡 Standard',
+      label: MdmPromptLevels.LABELS.MEDIUM,
       gen: (meta, comments) =>
         `# Role: Community Sentiment Analyst\n\n# Metadata\n${JSON.stringify(meta, null, 2)}\n\n# Thread (Nested)\n${_formatComments(comments)}\n\n# Task\nAnalysiere Sentiment und extrahiere Schlüsselfakten.`,
     },
     DETAILED: {
-      label: '🧐 Ausführlich',
+      label: MdmPromptLevels.LABELS.DETAILED,
       gen: (meta, comments) =>
         `# Role: UX Researcher\n\n# Metadata\n${JSON.stringify(meta, null, 2)}\n\n# Thread\n${_formatComments(comments)}\n\n# Protocol\nAnalysiere Interaktionen zwischen Haupt- und Antwortkommentaren.`,
     },
@@ -360,7 +360,7 @@ const Exporter = (() => {
     // den Content-Bundle-Code nicht). RAW bei Mega-Threads weglassen,
     // damit chrome.storage.session (10 MB Quota) nicht ans Limit läuft.
     const promptTexts = {};
-    for (const key of Object.keys(_PROMPT_LEVELS)) {
+    for (const key of MdmPromptLevels.LEVELS) {
       promptTexts[key] = _PROMPT_LEVELS[key].gen(meta, comments);
     }
     if (promptTexts.RAW && promptTexts.RAW.length > 900_000) delete promptTexts.RAW;
@@ -506,7 +506,7 @@ const Exporter = (() => {
 
     // Build tabs
     const tabContainer = d.getElementById('tabs');
-    Object.keys(_PROMPT_LEVELS).forEach(key => {
+    MdmPromptLevels.LEVELS.forEach(key => {
       const btn = d.createElement('button');
       btn.className = `tab ${key === currentLevel ? 'active' : ''}`;
       btn.textContent = _PROMPT_LEVELS[key].label;

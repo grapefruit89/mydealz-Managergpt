@@ -21,8 +21,10 @@ const DIST = path.join(ROOT, 'dist');
 const MODULE_ORDER = [
   // ── Core: Infrastruktur ─────────────────────────────────────────────────────
   'core/logger.js',             // Logging (muss zuerst laden)
+  'core/message-types.js',      // Message-Registry (SSOT, audit via tests/message-audit)
   'core/storage.js',            // chrome.storage Wrapper
   'core/settings-schema.js',    // SSOT: Keys/Defaults/UI-Zugehörigkeit (VOR settings-store)
+  'core/prompt-levels.js',      // SSOT: Prompt-Stufen des Exporters (VOR exporter)
   'core/settings-store.js',     // Einstellungen lesen/schreiben
   'core/deal-parser.js',        // DOM → Deal-Objekt
   'core/graphql-client.js',     // GQL-Fetch mit Retry/429
@@ -143,12 +145,13 @@ function buildCSS() {
   console.log('✔  dist/content.css');
 }
 
-// Shared bundle für Extension-Seiten (popup.html): nur das Settings-Schema,
-// damit popup.js dieselben KEYS/DEFAULTS nutzt wie der Content-Script-Bundle.
+// Shared bundle für Extension-Seiten (popup.html, sidepanel/sidepanel.html):
+// Settings-Schema + Prompt-Level-SSOT, damit popup.js und sidepanel.js dieselben
+// KEYS/DEFAULTS/LABELS nutzen wie der Content-Script-Bundle.
 function buildPopupShared() {
-  const code = readModule('core/settings-schema.js');
+  const code = readModule('core/settings-schema.js') + '\n' + readModule('core/prompt-levels.js');
   fs.writeFileSync(path.join(DIST, 'settings-schema.js'), code, 'utf8');
-  console.log('✔  dist/settings-schema.js (Popup-Shared)');
+  console.log('✔  dist/settings-schema.js (Popup/SidePanel-Shared: Schema + Prompt-Levels)');
 }
 
 // ── Run ───────────────────────────────────────────────────────────────────────

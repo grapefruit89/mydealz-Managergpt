@@ -4,17 +4,11 @@
  * Run: node tests/collector.test.js
  */
 
-const { loadBundle, assert, src } = require('./harness.js');
+const { loadBundle, assert, src, moduleOrder } = require('./harness.js');
 
 const state = { entities: { threads: { '2810000': {} } }, feeds: { main: { ids: ['2810000'] } } };
 
-const { GraphQLClient, Collector } = loadBundle([
-  src('core', 'settings-schema.js'),
-  src('core', 'storage.js'),
-  src('core', 'logger.js'),
-  src('core', 'graphql-client.js'),
-  src('features', 'collector.js'),
-], {
+const { GraphQLClient, Collector } = loadBundle(moduleOrder(), {
   expose: ['GraphQLClient', 'Collector'],
   setup() {
     global.window = { location: { href: 'https://www.mydealz.de/deals', pathname: '/deals', search: '?page=1' }, __INITIAL_STATE__: state };

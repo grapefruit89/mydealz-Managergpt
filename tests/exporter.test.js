@@ -5,15 +5,11 @@
  * Run: node tests/exporter.test.js
  */
 
-const { loadBundle, assert, src } = require('./harness.js');
+const { loadBundle, assert, src, moduleOrder } = require('./harness.js');
 
 const gqlCalls = []; // zählt /graphql-Requests
 
-const { GraphQLClient, Exporter } = loadBundle([
-  src('core', 'logger.js'),
-  src('core', 'graphql-client.js'),
-  src('features', 'exporter.js'),
-], {
+const { GraphQLClient, Exporter } = loadBundle(moduleOrder(), {
   expose: ['GraphQLClient', 'Exporter'],
   setup() {
     global.window = {

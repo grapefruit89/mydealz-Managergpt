@@ -59,4 +59,20 @@ function assert(cond, msg) {
   _passed++;
 }
 
-module.exports = { loadBundle, assert, src, ROOT: path.join(__dirname, '..') };
+/**
+ * Liest MODULE_ORDER direkt aus build.js — SSOT statt von Hand gepflegter
+ * Test-Dateilisten (P1.2, Claude/DeepSeek-Review-Fund F2). Ohne 'content.js'
+ * (Entry-Point ruft start() auf — darf in Tests nicht laufen).
+ * Die Tests laden denselben Bundle-Plan wie der echte Build -> kein Drift.
+ */
+function moduleOrder({ excludeContent = true } = {}) {
+  const build = fs.readFileSync(path.join(ROOT, 'build.js'), 'utf8');
+  const m = build.match(/const MODULE_ORDER = \[([\s\S]*?)\n\];/);
+  if (!m) throw new Error('MODULE_ORDER in build.js nicht gefunden');
+  const files = [...m[1].matchAll(/'([^']+)'/g)].map(x => x[1]);
+  const list = excludeContent ? files.filter(f => f !== 'content.js') : files;
+  // MODULE_ORDER-Einträge sind relativ zu src/ (readModule in build.js)
+  return list.map(f => 'src/' + f);
+}
+
+module.exports = { loadBundle, assert, src, moduleOrder, ROOT: path.join(__dirname, '..') };

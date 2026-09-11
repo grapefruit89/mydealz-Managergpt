@@ -136,6 +136,7 @@ const MyDealzManagerApp = (() => {
     _log('processDeals gen=' + gen + ': ' + articles.length + ' Deals');
 
     let i = 0;
+    let hiddenCount = 0;
 
     function _chunk(deadline) {
       if (_processGen !== gen) return; // neuerer Aufruf hat uebernommen => stopp
@@ -143,12 +144,17 @@ const MyDealzManagerApp = (() => {
       while (i < articles.length) {
         // Zeitbudget aufgebraucht (ausser beim Timeout-Pflichtlauf)?
         if (deadline.timeRemaining() < 2 && !deadline.didTimeout) break;
-        _processDeal(articles[i++], settings, debug);
+        if (_processDeal(articles[i++], settings, debug).hide) hiddenCount++;
       }
 
       if (i < articles.length) {
         // Noch nicht fertig => naechsten Idle-Slot anfordern
         _scheduleChunk(_chunk);
+      } else {
+        // Badge: verdeckte Deals dieses Tabs ans Icon (Audit-Fund: Sender fehlte)
+        try {
+          chrome.runtime.sendMessage({ type: 'MDM_BADGE', count: hiddenCount }).catch(function() {});
+        } catch (e) { /* Userscript-Build ohne chrome.runtime */ }
       }
     }
 
@@ -183,6 +189,7 @@ const MyDealzManagerApp = (() => {
     if (!hide) {
       UiController.injectButtons(el, deal);
     }
+    return result;
   }
 
   /** Re-process nach Settings-Aenderung oder SPA-Navigation. */

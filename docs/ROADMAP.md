@@ -124,3 +124,41 @@
 - **Nicht-Pepper-Plattformen** (slickdeals/ozbargain…) — eigene Engines, siehe `docs/werkzeuge.md`
 - **Auto-Retrigger auf fremde API-Raten** — Exporter bleibt Ein-Klick, kein Crawler (methodik §6 Deckel)
 - **Editor-/Font-/Schrift-Kosmetik, PN-Export, Voting-Power-Manipulation, eigene-Deals-Updates** — Quelle: Sammlungs-Thread 2035404, aber außerhalb unseres Daten-/Filter-Scopes (Voting-Power ist serverseitig, Schrift-Kosmetik = CSS-Thema der uBlock-Lösungen dort)
+
+## 4. Findings-Backlog — beide Architecture-Reviews (DeepSeek + Claude Sonnet 5, 2026-09-11)
+
+> Quelle: `~/Downloads/sonnet5-architecture-review-prompt.md` + beide Review-Outputs.
+> Claude hat den Code tatsächlich geladen, DeepSeek nur das Brief — DeepSeek-Findings
+> sind mit ⚠️ markiert (conditional). ROI = Impact ÷ Aufwand, absteigend.
+
+### ✅ Bereits erledigt (Commit `6c7f829`)
+| Finding | Quelle | Fix |
+|---|---|---|
+| Selection-Handoff-IIFE steckte IM `reset()`-Body (Handoff tot außer nach Reset) | Claude F1 | IIFE auf Modul-Toplevel |
+| Prompt-Label-Drift `LONG` vs. Exporter-Key `DETAILED` (Panel druckte rohen Key) | Claude F2 | Label-Kopie angeglichen (SSOT offene Punkt B2) |
+| `MDM_BLOCK_FROM_LINK`/`MDM_HIDE_FROM_LINK` ohne Listener (Feature halbfertig) | Claude F3 | Listener in `content.js` (Link-URL-Validierung, Toast, reprocess) |
+| `Logger.log()` existiert nicht → TypeError bei jeder Button-Injection | Claude F4 | → `Logger.debug` |
+| `contextMenus.create()` ohne `removeAll()` — Duplicate-ID-Fehler bei Updates | Claude F6 | removeAll vor create |
+
+### 🔴 P1 — Jetzt dran (alles S, direkt sichtbare Wirkung)
+1. **MessageTypes-Registry + Listener-Audit-Test** (S) — Konstanten-Modul + Test, der alle `sendMessage`-Call-Sites gegen `onMessage`-Handler abgleicht. Hätte Fund 3 automatisch gefangen. Höchstes ROI: verhindert genau die „halbfertiges Feature fault still"-Klasse.
+2. **Harness liest `MODULE_ORDER` aus `build.js`** (S) — Tests und Build nutzen dieselbe Dateiliste → Drift-Risiko der Concat-Pipeline erledigt, ohne den ADR-001-Standpunkt (keine npm-Toolchain) aufzugeben. Alternative (esbuild, M) bleibt K-Entscheidung offen.
+3. **Prompt-Levels-SSOT `core/prompt-levels.js`** (S) — root-fix für Fund 2 (Export-LABELS + SidePanel aus einer Quelle, wie settings-schema).
+4. **Popup-Handoff-Integrationstest** (S) — seedet `chrome.storage.session`, assertet `pl-input`-Befüllung. Erste Klebestelle-Abdeckung.
+
+### 🟠 P2 — Kern-Restrukturierung (M, höchste strategische Wirkung)
+5. **DealData-Normalizer** (§2.5 vorziehen) — Claude bewies: DREI Thread-Normalizer existieren (`deal-parser._fromState/_fromDom`, `graphql-client._normalizeGqlThread`, `collector._normalizeThread`) mit Feld-Drift (`discountPct` vs. `priceOff`, `merchantName` vs. `merchant`, Unix vs. ISO). Das ist ein aktiver Bug-Generator, kein Feature-Wunsch → vor Verdict-Aggregator/passive-capture ziehen.
+6. **Exporter-Split** (M) — pure Transforms (comment→prompt/MD) / Datenlayer / dünne UI (Fenster ODER SidePanel). Vorbedingung für den LLM-Chat (§2.14); DeepSeek F1 deckungsgleich (⚠️ dessen Begründung „duplicated GQL plumbing" war falsch — der Exporter nutzt den geteilten GraphQLClient).
+7. **`CommentData`/`ExportPayload`-Contract** (S–M) — zweiter Konsument existiert bereits, dritter (Chat) steht an. Mit 5/6 zusammen einspielen.
+
+### 🟡 P3 — Nächste Welle
+8. **Export-Orchestrierung aus dem Content-Script raus** (M) — offscreen document oder chunked session-payloads; RAW-Guard existiert bereits (900 KB).
+9. **`chrome.storage.sync` für Einstellungen** (M) — Diskussion geführt, Opt-in-Checkbox, `hiddenDeals` lokal lassen.
+10. **Bereits gevotete Deals ausblenden** (§2.10, M) — Vote-Zustand-Muster live verifizieren.
+11. **Deal-Updates/Slogan-Filter** (§2.10, M).
+
+### ⏸ Offen ohne Pull (bedroht, wenn P1/P2 erledigt)
+- **Sandbox-Chat-Bau** (§2.14): PLAN + `tests/sandbox-chat/chat.js` + Dev-Gate-Loader im Panel + 5×-Klick-Freischaltung im Popup — **halb offen** (Schema-Keys existieren, Stub hidden; Rest fehlt). Hängt an 6/7.
+- **E2E-Klick im echten Browser** — bekannter Blocker, Extension dort nicht geladen.
+- ⚠️ **esbuild-Umstellung** (DeepSeek F2, M) — nur falls K den Mittelweg (2) ablehnt; Claude bewies: alle gefundenen Bugs wären bundler-unabhängig gewesen.
+
