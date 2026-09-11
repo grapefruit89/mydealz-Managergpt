@@ -9,8 +9,8 @@ const { loadBundle, assert, src, moduleOrder } = require('./harness.js');
 
 const gqlCalls = []; // zählt /graphql-Requests
 
-const { GraphQLClient, Exporter } = loadBundle(moduleOrder(), {
-  expose: ['GraphQLClient', 'Exporter'],
+const { GraphQLClient, Exporter, ExportPayload, PromptBuilder } = loadBundle(moduleOrder(), {
+  expose: ['GraphQLClient', 'Exporter', 'ExportPayload', 'PromptBuilder'],
   setup() {
     global.window = {
       location: { href: 'https://www.mydealz.de/deals/test-deal-123/', origin: 'https://www.mydealz.de', pathname: '/deals/test-deal-123/' },
@@ -137,20 +137,7 @@ const { GraphQLClient, Exporter } = loadBundle(moduleOrder(), {
 
   const gqlCallsBefore = () => gqlCalls.length;
 
-  // transform/score/permalink Unit-Checks
-  const op = 'opUser';
-  const c1 = Exporter._test._transformComment(
-    { commentId: 'c1', user: { username: 'opUser' }, preparedHtmlContent: 'hi <a href="https://x.de">link</a>',
-      reactionCounts: [{ type: 'LIKE', count: 1 }, { type: 'HELPFUL', count: 2 }], replyCount: 2, createdAtTs: 1725148800 },
-    op);
-  assert(c1.user === 'opUser [OP]', 'OP-Badge gesetzt');
-  assert(c1.permalink === 'https://www.mydealz.de/deals/test-deal-123/#comment-c1', 'Hauptkommentar-Permalink #comment-<id>');
-  assert(c1.reactions.score === 14, 'Score: helpful×3 + replies×3 + like×2 = 2*3+2*3+1*2 = 14');
-  assert(c1.text.includes('[link](https://x.de)'), 'Markdown-Link-Erhalt im Text');
-
-  const r = Exporter._test._transformComment(
-    { commentId: 'r7', mainCommentId: 'c1', user: { username: 'userX' }, preparedHtmlContent: 're', reactionCounts: [], createdAtTs: 1725148800 }, op);
-  assert(r.permalink === 'https://www.mydealz.de/deals/test-deal-123/#reply-r7', 'Antwort-Permalink #reply-<id>');
+  // Transform/Score/Permalink-Unit-Checks: siehe comment-normalizer.test.js
 
   // End-to-End über _run (Cache leer → frischer Fetch)
   const btn = { disabled: false, textContent: '' };
@@ -175,6 +162,14 @@ const { GraphQLClient, Exporter } = loadBundle(moduleOrder(), {
   assert((md.match(/Preview-Reply/g) || []).length === 1, 'keine Duplikate (Batch ersetzt Preview)');
   assert(md.includes('⭐ 14'), 'Markdown: Reaction-Score sichtbar');
   assert(md.includes('😄 5'), 'Markdown: Funny-Reaktion');
+
+  // ExportPayload-Contract (P2.7): Chat-Basis, Schema-Marker + Stats
+  const p = ExportPayload.create('123', { Titel: 'T' }, [{ id: 'c1', replies: [{ id: 'r1', replies: [] }] }]);
+  assert(ExportPayload.isValid(p), 'ExportPayload: isValid (schema mdm-export@1)');
+  assert(p.stats.total === 2, 'ExportPayload: rekursive Kommentarzahl');
+  assert(p.threadId === '123' && p.comments.length === 1, 'ExportPayload: threadId + comments');
+  assert(PromptBuilder.build('SHORT', { Titel: 'T' }, []).includes('# Context'), 'PromptBuilder: pure Stufe bauen');
+  assert(Object.keys(PromptBuilder.buildAll({ Titel: 'T' }, [])).length === 4, 'PromptBuilder: alle 4 Stufen aus SSOT');
 
   console.log('exporter.test.js PASSED');
 })().catch(e => { console.error(e.message); process.exit(1); });

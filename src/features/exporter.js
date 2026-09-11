@@ -106,146 +106,12 @@ const Exporter = (() => {
   // (tiefe/verdeckte) Replies laden wir per 30er-Alias-Batch nach — 1 Request
   // pro 30 Parents statt 1 Request pro Parent.
 
-  // ── HTML → plain text + Markdown links ────────────────────────────────────
+  // ── Comment-Transform + Prompt-Texte: SSOT-Module ─────────────────────────
+  // CommentNormalizer (CommentData-Contract), PromptBuilder (pure) und
+  // ExportPayload (Contract) leben in src/core/ — der Exporter ist jetzt
+  // nur noch Orchestrierung (GQL + Cache) + dünne UI (Export-Split).
 
-  function _cleanHtml(html) {
-    if (!html) return '';
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-    // Convert <a href="…">text</a> → [text](url)
-    doc.querySelectorAll('a').forEach(a => {
-      const href  = a.getAttribute('href');
-      const label = a.textContent.trim() || 'Link';
-      if (href && !href.startsWith('javascript:') && !href.startsWith('data:')) {
-        a.replaceWith(` [${label}](${href}) `);
-      } else {
-        a.replaceWith(` [${label}] `);
-      }
-    });
-    doc.querySelectorAll('br').forEach(br => br.replaceWith(' '));
-    return doc.body.textContent.replace(/\s+/g, ' ').trim();
-  }
-
-  // ── Comment transform ──────────────────────────────────────────────────────
-
-  /**
-   * Reaction-Score (Muster MydealzExporter-Dashboard):
-   * helpful×3 + replies×3 + like×2 + funny — gewichtet "echte Antworten"
-   * höher als Memes und Beifall. warning signal: viel funny + wenig helpful.
-   */
-  function _score(item, replyCount) {
-    let like = 0, helpful = 0, funny = 0;
-    (item.reactionCounts ?? []).forEach(r => {
-      if (r.type === 'LIKE')    like    = r.count;
-      if (r.type === 'HELPFUL') helpful = r.count;
-      if (r.type === 'FUNNY')   funny   = r.count;
-    });
-    return {
-      like, helpful, funny,
-      score: helpful * 3 + (replyCount ?? item.replyCount ?? 0) * 3 + like * 2 + funny,
-    };
-  }
-
-  /**
-   * Kommentar-Permalink (verifizierte mydealz-Formate, Sammlung 2035404):
-   *   Hauptkommentar → ...#comment-<id>
-   *   Antwort        → ...#reply-<id>
-   */
-  function _permalink(item) {
-    if (!item?.commentId) return '';
-    const base = location.origin + location.pathname;
-    return item.mainCommentId
-      ? `${base}#reply-${item.commentId}`
-      : `${base}#comment-${item.commentId}`;
-  }
-
-  function _transformComment(item, opUsername) {
-    if (!item || !item.user) {
-      return {
-        id: item?.commentId ?? 'unknown',
-        user: '[Gelöscht]',
-        text: '[Dieser Kommentar wurde entfernt]',
-        date: 'N/A',
-        reactions: { like: 0, helpful: 0, funny: 0, score: 0 },
-        permalink: _permalink(item),
-        replies: [],
-      };
-    }
-
-    let userLabel = item.user.username ?? 'Unbekannt';
-    if (opUsername && userLabel === opUsername) userLabel += ' [OP]';
-
-    const reactions = _score(item);
-
-    // createdAtTs (unix) ist verifiziert; Fallback auf createdAt-String
-    let date;
-    if (item.createdAtTs) {
-      date = new Date(item.createdAtTs * 1000).toISOString().split('T')[0];
-    } else if (item.createdAt) {
-      date = new Date(item.createdAt).toISOString().split('T')[0];
-    } else {
-      date = 'N/A';
-    }
-
-    return {
-      id:        item.commentId,
-      user:      userLabel,
-      text:      _cleanHtml(item.preparedHtmlContent),
-      date,
-      reactions: { like: reactions.like, helpful: reactions.helpful, funny: reactions.funny, score: reactions.score },
-      permalink: _permalink(item),
-      replies:   [],
-    };
-  }
-
-  // ── Markdown formatter (recursive, nested) ─────────────────────────────────
-
-  function _formatComments(comments, level = 0) {
-    const indent = '  '.repeat(level);
-    return comments.map(c => {
-      // Reaction string (Score zeigt KI die Kommentar-Qualität)
-      const parts = [];
-      if (c.reactions.like    > 0) parts.push(`👍 ${c.reactions.like}`);
-      if (c.reactions.helpful > 0) parts.push(`✅ ${c.reactions.helpful}`);
-      if (c.reactions.funny   > 0) parts.push(`😄 ${c.reactions.funny}`);
-      if (c.reactions.score   > 0) parts.push(`⭐ ${c.reactions.score}`);
-      const reactionStr = parts.length > 0 ? ` [${parts.join(' | ')}]` : '';
-      const linkStr = c.permalink ? ` [↗](${c.permalink})` : '';
-
-      const header = `${indent}👤 **${c.user}** [${c.date}]${reactionStr}${linkStr}`;
-      const body   = `${indent}${c.text.replace(/\n/g, `\n${indent}`)}`;
-      let out      = `${header}\n${body}`;
-
-      if (c.replies?.length > 0) {
-        out += `\n${indent}-- Antworten --\n${_formatComments(c.replies, level + 1)}`;
-      }
-      return out;
-    }).join('\n\n' + indent);
-  }
-
-  // ── Prompt level presets ───────────────────────────────────────────────────
-
-  const _PROMPT_LEVELS = {
-    RAW: {
-      label: MdmPromptLevels.LABELS.RAW,
-      gen: (meta, comments) => JSON.stringify({ meta, comments }, null, 2),
-    },
-    SHORT: {
-      label: MdmPromptLevels.LABELS.SHORT,
-      gen: (meta, comments) =>
-        `# Context\n${JSON.stringify(meta, null, 2)}\n\n# Comments\n${_formatComments(comments)}`,
-    },
-    MEDIUM: {
-      label: MdmPromptLevels.LABELS.MEDIUM,
-      gen: (meta, comments) =>
-        `# Role: Community Sentiment Analyst\n\n# Metadata\n${JSON.stringify(meta, null, 2)}\n\n# Thread (Nested)\n${_formatComments(comments)}\n\n# Task\nAnalysiere Sentiment und extrahiere Schlüsselfakten.`,
-    },
-    DETAILED: {
-      label: MdmPromptLevels.LABELS.DETAILED,
-      gen: (meta, comments) =>
-        `# Role: UX Researcher\n\n# Metadata\n${JSON.stringify(meta, null, 2)}\n\n# Thread\n${_formatComments(comments)}\n\n# Protocol\nAnalysiere Interaktionen zwischen Haupt- und Antwortkommentaren.`,
-    },
-  };
-
+  // ── Metadata extraction (detail page) ─────────────────────────────────────
   // ── Metadata extraction (detail page) ─────────────────────────────────────
 
   function _getMetadata(threadId) {
@@ -359,17 +225,23 @@ const Exporter = (() => {
     // Prompt-Texte vorgenerieren (SidePanel ist Extension-Seite und kennt
     // den Content-Bundle-Code nicht). RAW bei Mega-Threads weglassen,
     // damit chrome.storage.session (10 MB Quota) nicht ans Limit läuft.
-    const promptTexts = {};
-    for (const key of MdmPromptLevels.LEVELS) {
-      promptTexts[key] = _PROMPT_LEVELS[key].gen(meta, comments);
-    }
+    const promptTexts = PromptBuilder.buildAll(meta, comments);
     if (promptTexts.RAW && promptTexts.RAW.length > 900_000) delete promptTexts.RAW;
 
+    // ExportPayload-Contract: Kommentare wandern mit (Chat-Basis, §2.14)
+    const exportPayload = ExportPayload.create(threadId, meta, comments);
+    const payloadJson = JSON.stringify(exportPayload);
+
     const payload = {
+      schema: exportPayload.schema,
+      threadId: exportPayload.threadId,
       meta,
       promptTexts,
-      generatedAt: Date.now(),
+      generatedAt: exportPayload.generatedAt,
       hasRefresh: !!onRefresh,
+      // Kommentare für den Chat — bei Mega-Threads aus Quota-Gründen weglassen
+      comments: payloadJson.length < 2_000_000 ? comments : null,
+      stats: exportPayload.stats,
     };
     chrome.runtime.sendMessage({ type: 'MDM_EXPORT_DATA', payload }).catch(() => {});
   }
@@ -509,17 +381,17 @@ const Exporter = (() => {
     MdmPromptLevels.LEVELS.forEach(key => {
       const btn = d.createElement('button');
       btn.className = `tab ${key === currentLevel ? 'active' : ''}`;
-      btn.textContent = _PROMPT_LEVELS[key].label;
+      btn.textContent = MdmPromptLevels.LABELS[key];
       btn.onclick = () => {
         d.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         currentLevel = key;
-        out.value = _PROMPT_LEVELS[key].gen(meta, comments);
+        out.value = PromptBuilder.build(key, meta, comments);
       };
       tabContainer.appendChild(btn);
     });
 
-    out.value = _PROMPT_LEVELS[currentLevel].gen(meta, comments);
+    out.value = PromptBuilder.build(currentLevel, meta, comments);
 
     // Toast helper
     const toast    = d.getElementById('toast');
@@ -613,14 +485,14 @@ const Exporter = (() => {
         const needFetch   = [];
 
         for (const item of items) {
-          const node    = _transformComment(item, opUsername);
+          const node    = CommentNormalizer.transform(item, opUsername);
           const preview = item.repliesPreview ?? [];
           const missing = item.replyCount > 0 && preview.length < item.replyCount;
 
           if (!missing) {
             // Preview deckt alles ab → komplett übernehmen, kein Request
             for (const r of preview) {
-              node.replies.push(_transformComment(r, opUsername));
+              node.replies.push(CommentNormalizer.transform(r, opUsername));
               count++;
             }
           } else {
@@ -645,14 +517,14 @@ const Exporter = (() => {
               if (fetched.length > 0) {
                 // Komplettliste aus Batch ersetzt die Teil-Preview (keine Duplikate)
                 for (const r of fetched) {
-                  node.replies.push(_transformComment(r, opUsername));
+                  node.replies.push(CommentNormalizer.transform(r, opUsername));
                   count++;
                 }
               } else {
                 // API lieferte leer → Preview bleibt beste verfügbare Quelle
                 Logger.warn('Exporter', `Reply-Batch leer für Parent ${pid} — nutze repliesPreview (${preview.length})`);
                 for (const r of preview) {
-                  node.replies.push(_transformComment(r, opUsername));
+                  node.replies.push(CommentNormalizer.transform(r, opUsername));
                   count++;
                 }
               }
@@ -663,7 +535,7 @@ const Exporter = (() => {
             Logger.warn('Exporter', `Reply-Batch fehlgeschlagen (${e.message}) — nutze repliesPreview als Fallback`);
             for (const [, { node, preview }] of nodeByParent) {
               for (const r of preview) {
-                node.replies.push(_transformComment(r, opUsername));
+                node.replies.push(CommentNormalizer.transform(r, opUsername));
                 count++;
               }
             }
@@ -839,7 +711,7 @@ const Exporter = (() => {
     }
   }
 
-  return { init, _test: { _transformComment, _score, _permalink, _run } };
+  return { init, _test: { _run } };
 
 })();
 
