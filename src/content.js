@@ -66,6 +66,40 @@ const MyDealzManagerApp = (() => {
     if (typeof Collector !== 'undefined') safeInit('Collector', () => Collector.init());
     if (typeof PermalinkTools !== 'undefined') safeInit('PermalinkTools', () => PermalinkTools.init());
 
+    // -- Kontextmenü-Aktionen (background.js → Rechtsklick) ----------------------
+    // BUG-Fix Claude-Review (Fund 3): die Message-Typen hatten keinen Listener.
+    // Die Link-URL wird hier validiert (merchant-id= → Händler, -<id> → Deal);
+    // bei Nicht-Passung gibt es einen Inline-Hinweis statt Stille.
+    chrome.runtime.onMessage.addListener(function(msg, sender, sendResponse) {
+      if (msg?.type === 'MDM_BLOCK_FROM_LINK') {
+        const m = (msg.href || '').match(/merchant-id=(\d+)/);
+        if (!m) {
+          PermalinkTools?.toast?.('mydealz Manager: kein Händler-Link (merchant-id fehlt)');
+          sendResponse({ ok: false }); return false;
+        }
+        SettingsStore.addExcludeMerchant(m[1], m[1]).then(function() {
+          PermalinkTools?.toast?.('mydealz Manager: Händler ' + m[1] + ' blockiert');
+          reprocess();
+          sendResponse({ ok: true });
+        });
+        return false;
+      }
+      if (msg?.type === 'MDM_HIDE_FROM_LINK') {
+        const m = (msg.href || '').match(/-(\d+)(?:[?#].*)?$/);
+        if (!m) {
+          PermalinkTools?.toast?.('mydealz Manager: kein Deal-Link erkannt');
+          sendResponse({ ok: false }); return false;
+        }
+        SettingsStore.hideDeals(m[1]).then(function() {
+          PermalinkTools?.toast?.('mydealz Manager: Deal ' + m[1] + ' verdeckt');
+          reprocess();
+          sendResponse({ ok: true });
+        });
+        return false;
+      }
+      return false;
+    });
+
     // -- Core - muss funktionieren -----------------------------------------------
     UiController.init({
       onHide:      _handleHide,

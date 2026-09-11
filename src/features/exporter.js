@@ -788,7 +788,7 @@ const Exporter = (() => {
         anchor.style.gap        = '8px';
       }
       anchor.appendChild(btn);
-      Logger.log('Exporter', 'Button 2 (inline, neben Zum Deal) injiziert');
+      Logger.debug('Exporter', 'Button 2 (inline, neben Zum Deal) injiziert');
 
     } else {
       // ── Fallback: floating (falls kein Anchor gefunden) ───────────────────
@@ -807,7 +807,7 @@ const Exporter = (() => {
         fontFamily:   'inherit',
       });
       document.body.appendChild(btn);
-      Logger.log('Exporter', 'Button FAB (fallback) injiziert');
+      Logger.debug('Exporter', 'Button FAB (fallback) injiziert');
     }
   }
 

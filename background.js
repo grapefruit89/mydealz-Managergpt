@@ -23,6 +23,9 @@ const MDM_HOSTNAMES = [
 // Nur auf den Pepper-Domains sichtbar; auf externen Seiten (GitHub/Foren)
 // bleibt das Popup der Weg — dort laufen die Content-Scripts nicht.
 chrome.runtime.onInstalled.addListener(() => {
+  // onInstalled feuert auch bei Extension-Updates — alte Menüs erst weg,
+  // sonst create()-Duplicate-ID-Fehler (Claude-Review-Fund 6)
+  chrome.contextMenus.removeAll(() => {
   // „Permalinks auflösen“ auf ALLEN Seiten (Quelle: What's-New-Review 2026-09-11
   // — action.openPopup(), Chrome 127): auf mydealz-Domains wird inline aufgelöst,
   // auf externen Seiten (GitHub/Foren — der eigentliche Use-Case!) übernimmt
@@ -44,6 +47,7 @@ chrome.runtime.onInstalled.addListener(() => {
     contexts: ['link'],
     documentUrlPatterns: MDM_HOSTNAMES.map(h => 'https://' + h + '/*'),
   });
+  }); // removeAll-Callback
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {

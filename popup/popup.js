@@ -132,23 +132,7 @@ async function reset() {
   if (!confirm('Alle Einstellungen zurücksetzen?\n(Ausgeblendete Deals bleiben erhalten)')) return;
   const keep = await chrome.storage.local.get({ [KEYS.hiddenDeals]: {} });
   await chrome.storage.local.set({ ...DEFAULTS, [KEYS.hiddenDeals]: keep[KEYS.hiddenDeals] });
-load();
-
-// ── Selection-Handoff aus Kontextmenü (externe Seiten) ───────────────────────
-// Quelle: What's-New-Review 2026-09-11 (action.openPopup, Chrome 127).
-// Rechtsklick auf einer fremden Seite (GitHub, Foren) → Auswahl landet hier
-// und der Übersetzer läuft direkt los.
-(async () => {
-  try {
-    const s = await chrome.storage.session.get('mdm_popup_handoff');
-    const handoff = s?.mdm_popup_handoff;
-    if (!handoff?.text) return;
-    await chrome.storage.session.remove('mdm_popup_handoff');
-    if (!extractPermalinkIds(handoff.text).length) return; // nur Anzeige, kein Toast
-    $('pl-input').value = handoff.text;
-    translatePermalinks();
-  } catch { /* session evtl. nicht verfügbar — ignoriert */ }
-})();
+  load();
   triggerReprocess();
 }
 
@@ -259,3 +243,21 @@ $('import-file').addEventListener('change', (e) => {
 });
 
 load();
+
+load();
+
+// ── Selection-Handoff aus Kontextmenü (externe Seiten) ───────────────────────
+// Quelle: What's-New-Review 2026-09-11 (action.openPopup, Chrome 127).
+// Rechtsklick auf einer fremden Seite (GitHub, Foren) → Auswahl landet hier
+// und der Übersetzer läuft direkt los.
+(async () => {
+  try {
+    const s = await chrome.storage.session.get('mdm_popup_handoff');
+    const handoff = s?.mdm_popup_handoff;
+    if (!handoff?.text) return;
+    await chrome.storage.session.remove('mdm_popup_handoff');
+    if (!extractPermalinkIds(handoff.text).length) return; // nur Anzeige, kein Toast
+    $('pl-input').value = handoff.text;
+    translatePermalinks();
+  } catch { /* session evtl. nicht verfügbar — ignoriert */ }
+})();

@@ -114,6 +114,7 @@
 - **🔵 Structured-Clone-Messaging (Chrome 148, opt-in)** — könnte den `storage.session`-Hop des Exporters ersetzen (direkte Messaging-Übergabe); erst evaluieren, wenn Chat-Datenströme größer werden (§2.14).
 - **🔵 API-Key-Hygiene** — Quelle: What's-New-Video „How to keep API keys safe". Für `mdm_geminiKey` (§2.14): `storage.session` statt `local` evaluieren (nicht auf Disk; Trade-off: Key überlebt Browser-Neustart nicht).
 - **🔵 Web-Store-Phase (Blog-Updates 2026):** Publisher-Rollen jetzt kostenlos, Appeals direkt im Dashboard, Private-Publishing an externe Orgs — für den geplanten Web-Store-Release notiert.
+- **🟠 MessageTypes-Registry + Listener-Test (Claude-Review 2026-09-11)** — Fund: 2 von 8 Message-Typen hatten keinen Empfänger (halbfertiges Kontextmenü-Feature, rote bis wir es bemerkten). Fix-Nachbau: Konstanten-Modul + ein Test, der alle `sendMessage`-Call-Sites gegen `onMessage`-Handler abgleicht. Billiger als ein typed Router, fängt genau die beobachtete Fehlerklasse. (Nachtrag: Die fehlenden Listener sind seit dem Review implementiert — content.js; der Registry-Test bleibt als Rückhaltenetz.)
 - **kein Nutzwert:** `sidePanel.getLayout()` (RTL, irrelevant), `browser.publicSuffix` (153; unsere Domain-Liste ist statisch), `alarms`-Namenslimit (keine alarms), `userScripts`/DevTools-APIs (nicht im Einsatz), `StorageArea.getKeys()` (minimal).
 
 ## 3. Bewusst nicht geplant ⛔
