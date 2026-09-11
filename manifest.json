@@ -7,8 +7,14 @@
 
   "permissions": [
     "storage",
-    "activeTab"
+    "activeTab",
+    "contextMenus",
+    "sidePanel"
   ],
+
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
+  },
 
   "host_permissions": [
     "https://www.mydealz.de/*",

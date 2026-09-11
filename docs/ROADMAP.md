@@ -84,6 +84,38 @@
 - **✅ Filterwort-Vorschläge aus Deal-Titeln** — Quelle: Original-Extras (Funktionsübersicht). Implementiert 2026-09-11: Chips im Settings-Modal (häufigste Tokens ≥3×, ≥4 Zeichen, Stopwörter raus, Klick → Ausblend-Liste).
 - **🔵 Sortierpräferenz speichern** („Neueste zuerst") — Quelle: Solo Tools „Letzte Sortierung speichern" (`/tmp/opencode/mydealz-Manager/Solo Tools/`); Checkbox im Sortiermenü + Storage (S).
 
+### 🔵 2.13 Chrome-Extension-APIs zur Aufwertung (Quelle: `https://developer.chrome.com/docs/extensions/reference/api`, gesichtet 2026-09-11)
+- **🟡 `contextMenus`** (keine Extra-Permission): Rechtsklick auf markierte Permalinks → „Mit mydealz Manager auflösen" (2.2, dann ohne Popup-Umweg); Rechtsklick auf Deal-Karte → „Deal verdecken"/„Händler blocken".
+- **🟡 `commands`** (keine Permission): Tastenkürzel — Alt+S Settings-Modal, Alt+C Collector, Alt+E Exporter.
+- **🟡 `chrome.action.setBadgeText`** (keine Permission): Badge zeigt Anzahl verdeckter Deals des aktiven Tabs (Content meldet nach `processDeals()`, background setzt Badge).
+- **🟡 `chrome.storage.sync`** (Permission „storage" ist schon da): Einstellungen geräteübergreifend synchronisieren. Quota beachten: 8 KB/Item, 100 KB gesamt — Settings-JSON passt; `hiddenDeals`-Map muss wegen Item-Limits getrimmt werden. Stufenidee: Sync opt-in Checkbox.
+- **✅ `sidePanel`** (Permission `sidePanel`): Exporter-Dashboard als Sidebar statt Extra-Fenster. Implementiert 2026-09-11: Klick auf 🧠 AI Export öffnet das Panel sofort (User-Gesture-Anforderung von `sidePanel.open` erfüllt), Export-Daten über `chrome.storage.session` (MDM_EXPORT_STATUS/DATA), „🔄" via MDM_EXPORT_REDO-Relay. Fallback: altes Popup-Fenster (Userscript-Build). Dateien: `sidepanel/`.
+- **📋 §2.14 Chat-Anbindung im SidePanel (Deal-Chat à la YouTube-KI-Apps)** — Quelle: User-Analyse 2026-09-11 (YouTube-KI-Extensions-Pipeline „Video→Text→LLM"), verallgemeinert auf mydealz:
+
+  **Stufe 1 — „Vom Deal zum Text" (✅ bereits gebaut):**
+  YouTube-Transkript ≙ unser Kommentar-Export: alle Kommentare inkl. Replies via GQL (verifizierte Queries), strukturiert mit commentId/Permalink/Autor/Reactions/Score, plus Deal-Meta. Bereits im SidePanel (`mdm_export_payload`) — kein Whisper-Äquivalent nötig, mydealz hat keinen „Audio-Track".
+  - Belegkultur als Superkraft: Permalinks (`#comment-<id>`) = unsere „Zeitstempel" — jede Chat-Antwort kann auf konkrete Kommentare verlinken.
+
+  **Stufe 2 — „Vom Text zur Antwort", drei Stufen:**
+  - **A (Klein, zuerst):** Alle-in-den-Prompt wie das Export-UI heute — Kontextgröße im Panel anzeigen (Kommentarzahl → geschätzte Tokens), Chat-History mit wiederholtem Kontext. Trigger-Kette: Chrome On-Device `window.ai` → Gemini-Key (Popup) → Fehlermeldung; KEIN Backend (local-only, §3).
+  - **B (Map-Reduce, verifizierte Basis):** Threads >250 relevante Kommentare → Batches à 40 einzeln zusammenfassen, Zusammenfassungen als Kontext (Muster aus MydealzExporter, dort implementiert). Für Chat: Zusammenfassung + Volltext der Top-N-Score-Kommentare als Kontext.
+  - **C (RAG-Lite, später):** Frage-gesteuerte lokale Retrieval-Stufe OHNE Vektor-DB: Volltext-Match + Autor/Score/Reaction-Filter selektieren die Top-N-Chunks aus den bereits geladenen Kommentaren (IndexedDB-Cache vorhanden). Echte Embeddings nur opt-in mit Cloud-Key (Kosten + Datenschutz-Trade-off dokumentieren).
+  - Grenzen analog YouTube-Apps: Halluzinations-Guard „nur aus dem Kontext antworten + Permalink zitieren", Kontext-Limit-Handling via A→B→C-Fallstrick.
+
+  UI: Chat-Sektion ersetzt den Stub in `sidepanel/` (Messages-Liste, Streaming, Kontextgröße-Badge). Aufwand A: S–M, B: M, C: M–L.
+- **🟠 `notifications`**: „Collector fertig (N Deals exportiert)" / Throttle-Warnung bei 429.
+- **🟠 `omnibox`**: Keyword `md` → „md iphone 17" startet mydealz-Suche direkt (öffnet nur eine URL, keine Datenfreigabe).
+- **🔵 `cookies`-Permission (optional):** GQL direkt aus background (CSRF via Cookie statt Content-Script-Relay) — macht den Permalink-Übersetzer unabhängig vom offenen Tab; Permission-Abwägung: neuentstehende Warnung vs. Komfort.
+- **🔵 `browser.*`-Namespace (ab Chrome 148):** offizieller Cross-Browser-Standard (Firefox-freundlich). Wenn Web-Store-Release geplant, Migration `chrome.*` → `browser.*` evaluieren (Transition-Guide).
+- **⛔ bewusst NICHT:** `alarms` (Roadmap ⛔ kein Auto-Retrigger/Crawler), `declarativeNetRequest` (Optik-Cleanup bleibt DOM), `downloads` (Blob-Download reicht).
+
+- **✅ `action.openPopup()` (Chrome 127)** — Quelle: What's-New-Review 2026-09-11 (`https://developer.chrome.com/docs/extensions/whats-new`). Implementiert: „Permalinks auflösen" erscheint jetzt auf **allen** Seiten; auf mydealz inline, auf externen Seiten (GitHub/Foren — der eigentliche Use-Case) via `chrome.storage.session`-Handoff ins Popup (`mdm_popup_handoff`), das die Übersetzung automatisch ausführt.
+- **🔵 `contextMenus` `"tab"`-Kontext (Chrome 150)** — Idee: Rechtsklick auf mehrere markierte Tabs → „Deals dieser Tabs sammeln" (Multi-Tab-Collector-Batch). Aufwand M, Status offen.
+- **🔵 Structured-Clone-Messaging (Chrome 148, opt-in)** — könnte den `storage.session`-Hop des Exporters ersetzen (direkte Messaging-Übergabe); erst evaluieren, wenn Chat-Datenströme größer werden (§2.14).
+- **🔵 API-Key-Hygiene** — Quelle: What's-New-Video „How to keep API keys safe". Für `mdm_geminiKey` (§2.14): `storage.session` statt `local` evaluieren (nicht auf Disk; Trade-off: Key überlebt Browser-Neustart nicht).
+- **🔵 Web-Store-Phase (Blog-Updates 2026):** Publisher-Rollen jetzt kostenlos, Appeals direkt im Dashboard, Private-Publishing an externe Orgs — für den geplanten Web-Store-Release notiert.
+- **kein Nutzwert:** `sidePanel.getLayout()` (RTL, irrelevant), `browser.publicSuffix` (153; unsere Domain-Liste ist statisch), `alarms`-Namenslimit (keine alarms), `userScripts`/DevTools-APIs (nicht im Einsatz), `StorageArea.getKeys()` (minimal).
+
 ## 3. Bewusst nicht geplant ⛔
 
 - **Remote-Telemetrie** — local-only Prinzip (`ARCHITECTURE_BRIEF` §5.2)

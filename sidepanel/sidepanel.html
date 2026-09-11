@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mydealz Manager — Export</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <header>
+    <h2>💎 mydealz AI Exporter <span class="badge">Sidebar</span></h2>
+    <div class="meta-bar" id="meta-bar">Noch kein Export — Deal-Seite öffnen und 🧠 AI Export klicken.</div>
+  </header>
+
+  <div class="controls" id="controls" hidden>
+    <div>
+      <div class="label">Prompt-Vorlage</div>
+      <div class="tabs" id="tabs"></div>
+    </div>
+    <div class="action-row">
+      <div>
+        <div class="label">Exportieren</div>
+        <div class="btn-row">
+          <button class="btn btn-primary" id="btnCopy" disabled>📋 Kopieren</button>
+          <button class="btn" id="btnMd" disabled>💾 .MD</button>
+          <button class="btn" id="btnRefresh" title="Cache löschen + Neu laden">🔄</button>
+        </div>
+      </div>
+      <div>
+        <div class="label">Direkt öffnen</div>
+        <div class="btn-row" id="ai-links"></div>
+      </div>
+    </div>
+  </div>
+
+  <main><textarea id="out" readonly placeholder=""></textarea></main>
+
+  <!-- Chat-Sektion: Experiment, nur mit Entwickleroptionen sichtbar
+       (Freischaltung: 5× Klick auf die Version im Popup — siehe
+       tests/sandbox-chat/README.md). Ohne devMode bleibt der Stub hidden. -->
+  <div class="chat" id="chat" hidden>
+    <div class="label">Chat über den Deal (geplant)</div>
+    <div class="chat-row">
+      <input type="text" id="chat-input" placeholder="Frage stellen … (bald: On-Device-AI)" disabled>
+      <button class="btn" id="chat-send" disabled>➤</button>
+    </div>
+    <div class="chat-note" id="chat-note">Chat-Anbindung folgt — Datenbasis (Kommentar-Export) ist bereits vorhanden.</div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+  <script src="sidepanel.js"></script>
+</body>
+</html>

@@ -62,6 +62,11 @@ const MdmSchema = (() => {
 
     // Intern (nie in UI, resetKeep: Version überlebt Reset)
     { name: 'schemaVersion',     key: 'mdm_schemaVersion',     type: 'internal',   default: 0,       modal: false, popup: false, resetKeep: true },
+
+    // Entwickleroptionen (Freischaltung: 5× Klick auf die Version im Popup)
+    { name: 'devMode',           key: 'mdm_devMode',           type: 'bool',       default: false,   modal: false, popup: false },
+    // Gemini-API-Key (Chat-Experiment, tests/sandbox-chat/); Nutzerdaten → resetKeep
+    { name: 'geminiKey',         key: 'mdm_geminiKey',         type: 'internal',   default: '',      modal: false, popup: false, resetKeep: true },
   ];
 
   // ── Derived helpers ─────────────────────────────────────────────────────────

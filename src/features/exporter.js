@@ -324,7 +324,55 @@ const Exporter = (() => {
     URL.revokeObjectURL(url);
   }
 
-  // ── Export UI (popup window) ───────────────────────────────────────────────
+  // ── Status helper (Button + SidePanel synchron) ─────────────────────────────
+
+  function _pushStatus(text) {
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      chrome.runtime.sendMessage({ type: 'MDM_EXPORT_STATUS', text }).catch(() => {});
+    }
+  }
+
+  function _setStatus(btn, text) {
+    if (btn) btn.textContent = text;
+    _pushStatus(text);
+  }
+
+  // ── Export UI (SidePanel first, popup window als Fallback) ─────────────────
+
+  /**
+   * Zeigt das Export-Ergebnis im SidePanel (Sidebar neben dem Deal).
+   * Quelle: Chrome-API-Review (ROADMAP §2.13) + User-Wunsch „Dashboard als
+   * Sidebar statt Extra-Fenster". Das Panel wird beim Button-Klick geöffnet
+   * (frische User-Gesture, background: MDM_EXPORT_OPEN); die Export-Daten
+   * landen nach der Sammel-Phase über chrome.storage.session im Panel.
+   * Läuft SidePanel nicht (Userscript-Build, alte Engine) → altes Popup-Fenster.
+   */
+  async function _showResult(meta, comments, onRefresh) {
+    let opened = false;
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      try {
+        opened = (await chrome.runtime.sendMessage({ type: 'MDM_EXPORT_OPEN' }))?.opened ?? false;
+      } catch { opened = false; }
+    }
+    if (!opened) { _openUi(meta, comments, onRefresh); return; }
+
+    // Prompt-Texte vorgenerieren (SidePanel ist Extension-Seite und kennt
+    // den Content-Bundle-Code nicht). RAW bei Mega-Threads weglassen,
+    // damit chrome.storage.session (10 MB Quota) nicht ans Limit läuft.
+    const promptTexts = {};
+    for (const key of Object.keys(_PROMPT_LEVELS)) {
+      promptTexts[key] = _PROMPT_LEVELS[key].gen(meta, comments);
+    }
+    if (promptTexts.RAW && promptTexts.RAW.length > 900_000) delete promptTexts.RAW;
+
+    const payload = {
+      meta,
+      promptTexts,
+      generatedAt: Date.now(),
+      hasRefresh: !!onRefresh,
+    };
+    chrome.runtime.sendMessage({ type: 'MDM_EXPORT_DATA', payload }).catch(() => {});
+  }
 
   function _openUi(meta, comments, onRefresh) {
     const w = window.open('', '_blank', 'width=1040,height=820');
@@ -513,7 +561,7 @@ const Exporter = (() => {
 
   async function _run(btn, forceRefresh = false) {
     if (_running) {
-      alert('[MDM Exporter] Export läuft bereits…');
+      if (btn) alert('[MDM Exporter] Export läuft bereits…');
       return;
     }
 
@@ -521,8 +569,8 @@ const Exporter = (() => {
     if (!threadId) { alert('[MDM Exporter] Thread-ID konnte nicht ermittelt werden.'); return; }
 
     _running = true;
-    btn.disabled = true;
-    const origText = btn.textContent;
+    if (btn) btn.disabled = true;
+    const origText = btn?.textContent ?? '🧠 AI Export';
 
     try {
       // 1. Cache check
@@ -532,7 +580,7 @@ const Exporter = (() => {
           Logger.debug('Exporter', 'Aus Cache geladen (Thread', threadId + ')');
           cached.meta._fromCache = true;
           cached.meta._cacheTime = cached.timestamp;
-          _openUi(cached.meta, cached.comments, () => _run(btn, true));
+          _showResult(cached.meta, cached.comments, () => _run(btn, true));
           return;
         }
       } else {
@@ -540,12 +588,12 @@ const Exporter = (() => {
       }
 
       // 2. Metadata
-      btn.textContent = '⏳ Metadaten…';
+      _setStatus(btn, '⏳ Metadaten…');
       const meta = _getMetadata(threadId);
       const opUsername = meta.OP;
 
       // 3. First comment page (to get total pages)
-      btn.textContent = '⏳ Kommentare…';
+      _setStatus(btn, '⏳ Kommentare…');
       const firstPage = await _fetchRootPage(threadId, 1);
       if (!firstPage) throw new Error('Kommentar-API nicht erreichbar (Rate Limit?)');
 
@@ -581,7 +629,7 @@ const Exporter = (() => {
           }
 
           count++;
-          btn.textContent = `⏳ ${count}/${meta.KommentarAnzahl || '?'}`;
+          _setStatus(btn, `⏳ ${count}/${meta.KommentarAnzahl || '?'}`);
           nodes.push(node);
         }
 
@@ -589,7 +637,7 @@ const Exporter = (() => {
           try {
             const map = await GraphQLClient.fetchRepliesBatch(threadId, needFetch, {
               onProgress: (done, total) => {
-                btn.textContent = `⏳ Replies ${done}/${total} (Batch)…`;
+                _setStatus(btn, `⏳ Replies ${done}/${total} (Batch)…`);
               },
             });
             for (const [pid, { node, preview }] of nodeByParent) {
@@ -609,7 +657,7 @@ const Exporter = (() => {
                 }
               }
             }
-            btn.textContent = `⏳ ${count}/${meta.KommentarAnzahl || '?'}`;
+            _setStatus(btn, `⏳ ${count}/${meta.KommentarAnzahl || '?'}`);
           } catch (e) {
             // Batch fehlgeschlagen → Preview-Replies behalten statt ganze Seite zu werfen
             Logger.warn('Exporter', `Reply-Batch fehlgeschlagen (${e.message}) — nutze repliesPreview als Fallback`);
@@ -662,15 +710,15 @@ const Exporter = (() => {
       await Cache.set(threadId, meta, allComments);
 
       // 5. Open UI
-      _openUi(meta, allComments, () => _run(btn, true));
+      _showResult(meta, allComments, () => _run(btn, true));
 
     } catch (e) {
       Logger.error('Exporter', 'Export fehlgeschlagen', e);
       alert('[MDM Exporter] Fehler: ' + e.message);
     } finally {
       _running = false;
-      btn.disabled  = false;
-      btn.textContent = origText;
+      if (btn) btn.disabled  = false;
+      if (btn) btn.textContent = origText;
     }
   }
 
@@ -771,6 +819,19 @@ const Exporter = (() => {
     if (_initialized) return;      // verhindert doppelte DOMContentLoaded-Registrierung
     if (!_isDetailPage()) return;
     _initialized = true;
+
+    // SidePanel-„🔄 Neu laden“ → Cache verwerfen + Export erneut
+    if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage?.addListener) {
+      chrome.runtime.onMessage.addListener(function(msg, sender, sendResponse) {
+        if (msg?.type === 'MDM_EXPORT_REDO') {
+          _run(null, true);
+          sendResponse({ ok: true });
+          return false;
+        }
+        return false;
+      });
+    }
+
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', _injectButton);
     } else {
